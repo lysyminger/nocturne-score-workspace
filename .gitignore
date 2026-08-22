@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.tsbuildinfo
+data/
+.env
+.deploy/
+public/font/
+public/soundfont/
+public/audio/*.js
+public/audio/LICENSE.*

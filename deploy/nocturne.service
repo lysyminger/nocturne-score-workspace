@@ -1,0 +1,20 @@
+[Unit]
+Description=Nocturne score workspace
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nocturne
+Group=nocturne
+WorkingDirectory=/opt/nocturne/current
+Environment=APP_DATA_DIR=/opt/nocturne/shared/data
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/nocturne/venv/bin/python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

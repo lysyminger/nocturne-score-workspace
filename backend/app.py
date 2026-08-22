@@ -20,7 +20,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from starlette.concurrency import run_in_threadpool
 
 from backend.audio_analysis import analyze_audio_file
-from backend.bilibili import inspect_bilibili, parse_bilibili_source
+from backend.bilibili import cache_bilibili_thumbnail, inspect_bilibili, parse_bilibili_source
 from backend.database import Database
 from backend.score_pdf import build_slice_preview_pdf
 from backend.security import hash_password, hash_session_token, new_session_token, verify_password
@@ -204,10 +204,47 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             return None
         return parsed if isinstance(parsed, dict) else None
 
+    def resolve_project_file(project_id: str, path_value: str | None) -> Path | None:
+        if not path_value:
+            return None
+        candidate = Path(path_value).resolve()
+        project_root = (projects_dir / project_id).resolve()
+        if not candidate.is_relative_to(project_root) or not candidate.is_file():
+            return None
+        return candidate
+
+    def cache_project_thumbnail(project_id: str, metadata: dict) -> dict:
+        result = dict(metadata)
+        with db.connect() as connection:
+            row = connection.execute(
+                "SELECT source_metadata FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+        previous = json_object(row["source_metadata"]) if row else None
+        previous_path = (previous or {}).get("_cover_path")
+        thumbnail_url = str(result.get("thumbnail") or "")
+        if thumbnail_url:
+            try:
+                cover_path = cache_bilibili_thumbnail(
+                    thumbnail_url, projects_dir / project_id / "source" / "cover.jpg"
+                )
+                result["_cover_path"] = str(cover_path)
+                return result
+            except Exception:
+                pass
+        if resolve_project_file(project_id, previous_path):
+            result["_cover_path"] = previous_path
+        return result
+
+    def safe_download_stem(value: str, fallback: str) -> str:
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", value).strip(" .")
+        return cleaned[:100] or fallback
+
     def project_payload(row) -> dict:
         project = dict(row)
         project["rights_confirmed"] = bool(project["rights_confirmed"])
-        project["source_metadata"] = json_object(project["source_metadata"])
+        source_metadata = json_object(project["source_metadata"])
+        cover_path = source_metadata.pop("_cover_path", None) if source_metadata else None
+        project["source_metadata"] = source_metadata
         project["video_analysis"] = json_object(project.get("video_analysis"))
         project["recognition_summary"] = json_object(project.get("recognition_summary"))
         project["audio_analysis"] = json_object(project.get("audio_analysis"))
@@ -252,6 +289,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         project["sync_points"] = sync_points
         project["score_images"] = images
         project["video_frames"] = video_frames
+        project["cover_url"] = (
+            f"/api/projects/{project_id}/files/cover?v={project['updated_at']}"
+            if resolve_project_file(project_id, cover_path)
+            else (source_metadata or {}).get("thumbnail") or None
+        )
         project["pdf_url"] = f"/api/projects/{project_id}/files/pdf" if project["score_pdf_path"] else None
         project["audio_url"] = f"/api/projects/{project_id}/files/audio" if project["audio_path"] else None
         project["score_file_url"] = f"/api/projects/{project_id}/files/score" if project["score_file_path"] else None
@@ -428,6 +470,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail="yt-dlp 未安装，暂时不能解析视频信息")
         try:
             metadata = await run_in_threadpool(inspect_bilibili, project["source_url"])
+            metadata = await run_in_threadpool(cache_project_thumbnail, project_id, metadata)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"B 站解析失败：{str(exc)[:240]}") from exc
         with db.connect() as connection:
@@ -474,6 +517,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "webpage_url": str(info.get("webpage_url") or source_url),
                 "extractor": str(info.get("extractor_key") or "BiliBili"),
             }
+            metadata = cache_project_thumbnail(project_id, metadata)
             with db.connect() as connection:
                 connection.execute(
                     """
@@ -1310,10 +1354,30 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         )
 
     @api.get("/api/projects/{project_id}/files/{kind}")
-    def get_project_file(project_id: str, kind: str, user: dict = Depends(current_user)) -> FileResponse:
+    def get_project_file(
+        project_id: str,
+        kind: str,
+        download: bool = False,
+        user: dict = Depends(current_user),
+    ) -> FileResponse:
         project = owned_project(project_id, user["id"])
+        if kind == "cover":
+            metadata = json_object(project["source_metadata"]) or {}
+            path = resolve_project_file(project_id, metadata.get("_cover_path"))
+            if not path:
+                raise HTTPException(status_code=404, detail="封面不存在")
+            return FileResponse(
+                path,
+                media_type="image/jpeg",
+                filename=f"{safe_download_stem(project['title'], project['source_id'])}-cover.jpg",
+                content_disposition_type="attachment" if download else "inline",
+            )
         mapping = {
-            "pdf": ("score_pdf_path", "score.pdf", "application/pdf"),
+            "pdf": (
+                "score_pdf_path",
+                f"{safe_download_stem(project['title'], project['source_id'])}.pdf",
+                "application/pdf",
+            ),
             "audio": ("audio_path", project["audio_name"] or "practice-audio", None),
             "score": ("score_file_path", project["score_file_name"] or "score", "application/octet-stream"),
             "video": ("video_path", "source-video", None),
@@ -1321,10 +1385,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         if kind not in mapping:
             raise HTTPException(status_code=404, detail="文件类型不存在")
         field, filename, media_type = mapping[kind]
-        path_value = project[field]
-        if not path_value or not Path(path_value).is_file():
+        path = resolve_project_file(project_id, project[field])
+        if not path:
             raise HTTPException(status_code=404, detail="文件不存在")
-        return FileResponse(path_value, media_type=media_type, filename=filename, content_disposition_type="inline")
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=filename,
+            content_disposition_type="attachment" if download else "inline",
+        )
 
     dist_dir = ROOT_DIR / "dist"
     if dist_dir.is_dir():

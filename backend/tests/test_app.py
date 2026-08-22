@@ -86,6 +86,49 @@ def test_auth_project_library_and_sync_persistence(client: TestClient):
     assert client.get("/api/projects").json()[0]["title"] == "午夜练习"
 
 
+def test_inspect_caches_private_cover_for_library(client: TestClient, monkeypatch):
+    register(client)
+    project = client.post(
+        "/api/projects",
+        json={"source_input": "BV1xx411c7mD", "title": "", "rights_confirmed": False},
+    ).json()
+
+    monkeypatch.setattr(
+        "backend.app.inspect_bilibili",
+        lambda _: {
+            "id": "BV1xx411c7mD",
+            "title": "封面测试曲",
+            "uploader": "测试作者",
+            "duration": 123.0,
+            "thumbnail": "https://i0.hdslb.com/bfs/archive/test.jpg",
+            "webpage_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "extractor": "BiliBili",
+        },
+    )
+
+    def fake_cache(_: str, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (640, 360), "#252238").save(destination, "JPEG")
+        return destination
+
+    monkeypatch.setattr("backend.app.cache_bilibili_thumbnail", fake_cache)
+    inspected = client.post(f"/api/projects/{project['id']}/inspect")
+    assert inspected.status_code == 200
+    payload = inspected.json()
+    assert payload["title"] == "封面测试曲"
+    assert payload["cover_url"].startswith(f"/api/projects/{project['id']}/files/cover")
+    assert "_cover_path" not in payload["source_metadata"]
+
+    cover = client.get(payload["cover_url"])
+    assert cover.status_code == 200
+    assert cover.headers["content-type"] == "image/jpeg"
+    assert cover.headers["content-disposition"].startswith("inline")
+    assert client.get("/api/projects").json()[0]["cover_url"] == payload["cover_url"]
+
+    second_client = TestClient(client.app)
+    assert second_client.get(payload["cover_url"]).status_code == 401
+
+
 def test_score_images_become_pdf_and_remain_private(client: TestClient):
     register(client)
     project = client.post(
@@ -105,6 +148,7 @@ def test_score_images_become_pdf_and_remain_private(client: TestClient):
     assert payload["pdf_url"]
     assert len(payload["score_images"]) == 1
     assert client.get(payload["pdf_url"]).headers["content-type"] == "application/pdf"
+    assert client.get(f"{payload['pdf_url']}?download=1").headers["content-disposition"].startswith("attachment")
     assert client.get(payload["score_images"][0]["url"]).headers["content-type"] == "image/jpeg"
 
     second_client = TestClient(client.app)

@@ -353,6 +353,9 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .alpha-host { width: min(100%, 66rem); min-height: 40rem; margin: 0 auto; border-radius: .3rem; overflow: hidden; background: #f6f5f1; box-shadow: 0 30px 75px rgba(0,0,0,.38); }
 .alpha-host .at-surface { background: #f6f5f1; }
 .alpha-controls { position: fixed; z-index: 5; left: calc((100vw - 22.5rem) / 2); bottom: 1rem; transform: translateX(-50%); display: flex; align-items: center; gap: .45rem; padding: .42rem; border: 1px solid var(--line-strong); border-radius: .85rem; background: rgba(20,20,24,.88); box-shadow: var(--shadow); backdrop-filter: blur(20px) saturate(150%); }
+.alpha-export-actions { display: flex; gap: .22rem; padding-left: .42rem; border-left: 1px solid var(--line); }
+.alpha-export-actions button { min-height: 1.85rem; display: inline-flex; align-items: center; justify-content: center; gap: .26rem; padding: .35rem .48rem; border: 0; border-radius: .46rem; color: #9998a4; font-size: .54rem; background: rgba(255,255,255,.045); cursor: pointer; transition: color .18s ease, background .18s ease, transform .12s ease, opacity .18s ease; }
+.alpha-export-actions button:hover:not(:disabled) { color: #e2e0ff; background: rgba(139,130,255,.14); }.alpha-export-actions button:active:not(:disabled) { transform: scale(.96); }.alpha-export-actions button:disabled { opacity: .38; cursor: not-allowed; }
 .alpha-status { display: flex; align-items: center; gap: .4rem; padding: 0 .5rem 0 .15rem; color: #8c8c95; font-size: .58rem; }
 .at-cursor-bar { background: rgba(111, 101, 213, .17) !important; }.at-cursor-beat { width: 2px !important; background: #6f65d5 !important; }.at-highlight * { fill: #675ec7 !important; stroke: #675ec7 !important; }
 
@@ -397,6 +400,8 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   .small-segmented button { padding: .38rem .45rem; }
   .score-viewport { padding-left: 1rem; padding-right: 1rem; }.score-page > span { display: none; }
   .score-viewport.video-workspace { padding: .6rem; }
+  .alpha-controls { width: calc(100% - 1rem); flex-wrap: wrap; justify-content: center; }
+  .alpha-status { flex: 1 1 100%; justify-content: center; min-height: 1.3rem; padding: 0 .35rem; text-align: center; }
   .video-edit-canvas, .slice-settings { padding: .75rem; }
   .video-frame-grid { grid-template-columns: 1fr; }
   .video-frame-card figcaption { grid-template-columns: auto 1fr auto; }.frame-review-button { grid-column: 1 / -1; justify-self: stretch; justify-content: center; }

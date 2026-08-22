@@ -191,6 +191,7 @@ export type Project = {
   video_analysis: VideoAnalysis | null;
   recognition_summary: RecognitionSummary | null;
   audio_analysis: AudioAnalysis | null;
+  cover_url: string | null;
   pdf_url: string | null;
   audio_url: string | null;
   score_file_url: string | null;

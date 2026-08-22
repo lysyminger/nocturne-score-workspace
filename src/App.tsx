@@ -95,6 +95,23 @@ function interpolateScorePosition(points: SyncPoint[], time: number) {
 
 type Notice = { message: string; tone: "success" | "error" } | null;
 
+function ProjectCover({ project }: { project: Project }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [project.cover_url]);
+
+  return project.cover_url && !failed ? (
+    <img
+      src={project.cover_url}
+      alt={`${project.title} 视频封面`}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  ) : (
+    <div className="cover-placeholder"><AudioLines size={30} /><span>{project.source_id}</span></div>
+  );
+}
+
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [capabilities, setCapabilities] = useState<Capabilities>(EMPTY_CAPABILITIES);
@@ -314,9 +331,21 @@ function LibraryScreen({
     event.preventDefault();
     setCreating(true);
     try {
-      const project = await api.createProject({ source_input: source, title, rights_confirmed: rights });
+      let project = await api.createProject({ source_input: source, title, rights_confirmed: rights });
+      let notice: Notice = { message: "项目已保存到私人曲库", tone: "success" };
+      if (capabilities.yt_dlp) {
+        try {
+          project = await api.inspectProject(project.id);
+          notice = { message: "视频信息与封面已自动保存", tone: "success" };
+        } catch (error) {
+          notice = {
+            message: `项目已创建，但封面获取失败：${error instanceof Error ? error.message : "可进入项目后重试"}`,
+            tone: "error"
+          };
+        }
+      }
       setProjects((current) => [project, ...current]);
-      showNotice({ message: "项目已保存到私人曲库", tone: "success" });
+      showNotice(notice);
       onOpen(project.id);
     } catch (error) {
       showNotice({ message: error instanceof Error ? error.message : "创建失败", tone: "error" });
@@ -375,7 +404,7 @@ function LibraryScreen({
               {projects.map((project) => (
                 <button className="project-card" key={project.id} onClick={() => onOpen(project.id)} type="button">
                   <div className="project-cover">
-                    {project.source_metadata?.thumbnail ? <img src={project.source_metadata.thumbnail} alt="" /> : <div className="cover-placeholder"><AudioLines size={30} /><span>{project.source_id}</span></div>}
+                    <ProjectCover project={project} />
                     <span className={`status-badge ${project.status}`}>{STATUS_LABELS[project.status] ?? project.status}</span>
                   </div>
                   <div className="project-card-body">
@@ -643,7 +672,7 @@ function ProjectWorkspace({
                   {canReview && <button type="button" className={viewMode === "review" ? "active" : ""} onClick={() => void openReviewAt()}>校对</button>}
                 </div>
               )}
-              {project.pdf_url && <a className="quiet-button" href={project.pdf_url} target="_blank" rel="noreferrer"><FileText size={15} /> {canReview ? "完整 PDF" : "预览 PDF"}</a>}
+              {project.pdf_url && <a className="quiet-button" href={`${project.pdf_url}?download=1`} download><FileText size={15} /> 导出 PDF</a>}
               <label className="quiet-button file-label"><ImagePlus size={15} /> 上传谱图<input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) run("images", async () => { await api.uploadImages(project.id, event.target.files!); setViewMode("images"); }, "PDF 已生成"); event.currentTarget.value = ""; }} /></label>
               <label className="quiet-button file-label"><FileMusic size={15} /> 导入乐谱<input type="file" accept=".gp,.gp3,.gp4,.gp5,.gpx,.musicxml,.xml,.mxl" onChange={(event) => { const file = event.target.files?.[0]; if (file) run("score", async () => { await api.uploadScore(project.id, file); setViewMode("score"); }, "结构化乐谱已载入"); event.currentTarget.value = ""; }} /></label>
             </div>
@@ -689,7 +718,7 @@ function ProjectWorkspace({
               />
             ) : viewMode === "score" && project.score_file_url ? (
               <Suspense fallback={<div className="score-loading"><LoaderCircle size={20} className="spin" /> 正在载入乐谱引擎</div>}>
-                <AlphaTabPlayer scoreUrl={`${project.score_file_url}?v=${encodeURIComponent(project.updated_at)}`} scrollElement={viewport} masterVolume={scoreVolume} />
+                <AlphaTabPlayer scoreUrl={`${project.score_file_url}?v=${encodeURIComponent(project.updated_at)}`} scrollElement={viewport} masterVolume={scoreVolume} fileBaseName={project.title} />
               </Suspense>
             ) : viewMode === "images" && project.score_images.length ? (
               <div className="score-pages">
@@ -720,7 +749,7 @@ function ProjectWorkspace({
             <div className="inspector-heading"><span><Link2 size={16} /></span><div><h3>视频来源</h3><p>{project.source_id}</p></div></div>
             {project.source_metadata ? (
               <div className="source-preview">
-                {project.source_metadata.thumbnail && <img src={project.source_metadata.thumbnail} alt="" />}
+                {project.cover_url && <img src={project.cover_url} alt="" referrerPolicy="no-referrer" />}
                 <div><strong>{project.source_metadata.title}</strong><span>{project.source_metadata.uploader || "Bilibili"} · {formatTime(project.source_metadata.duration)}</span></div>
               </div>
             ) : (

@@ -7,7 +7,9 @@ type Props = {
   diagnostics: RecognitionDiagnostics;
   measureNumber: number;
   busy: boolean;
+  embedded?: boolean;
   onMeasureChange: (measure: number) => void;
+  onDirtyChange: (dirty: boolean) => void;
   onSave: (measure: number, events: RecognitionEvent[]) => Promise<void>;
 };
 
@@ -43,7 +45,7 @@ function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, onMeasureChange, onSave }: Props) {
+export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, embedded = false, onMeasureChange, onDirtyChange, onSave }: Props) {
   const startMeasure = diagnostics.summary.start_measure ?? diagnostics.measures[0]?.number ?? 1;
   const endMeasure = diagnostics.summary.end_measure ?? diagnostics.measures.at(-1)?.number ?? startMeasure;
   const currentMeasure = diagnostics.measures.find((item) => item.number === measureNumber);
@@ -53,6 +55,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
   const [armedTechnique, setArmedTechnique] = useState<TabTechnique | null>(null);
   const digitBufferRef = useRef<{ key: string; value: string; time: number } | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
+  const saveInFlightRef = useRef(false);
 
   useEffect(() => {
     const nextEvents = cloneEvents(currentMeasure);
@@ -62,6 +65,9 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
     setSelectedCell({ onset: nextEvents[0]?.onset_eighths ?? 0, string: firstNote?.string ?? 1 });
     digitBufferRef.current = null;
   }, [measureNumber, diagnostics]);
+
+  useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
 
   const sourceFrame = useMemo(() => {
     const diagnosticFrame = diagnostics.frames.find((frame) => {
@@ -82,6 +88,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
   const selectedTechnique = selectedNote?.technique ?? armedTechnique;
 
   function markChanged(nextEvents: RecognitionEvent[]) {
+    if (busy || saveInFlightRef.current) return;
     setEvents([...nextEvents].sort((left, right) => left.onset_eighths - right.onset_eighths));
     setDirty(true);
   }
@@ -136,6 +143,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
   }
 
   function applyTechnique(technique: TabTechnique) {
+    if (busy || saveInFlightRef.current) return;
     const removing = selectedNote?.technique === technique;
     setArmedTechnique(removing ? null : technique);
     if (selectedEventIndex >= 0 && selectedNote) {
@@ -166,13 +174,24 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
   }
 
   function handleGridKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (/^\d$/.test(event.key)) {
+    if (busy || saveInFlightRef.current) {
+      if (event.code !== "Space") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    const handle = () => {
       event.preventDefault();
+      event.stopPropagation();
+    };
+    if (/^\d$/.test(event.key)) {
+      handle();
       writeDigit(event.key);
       return;
     }
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
-      event.preventDefault();
+      handle();
       moveSelection(
         event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0,
         event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0
@@ -180,27 +199,42 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
       return;
     }
     if (event.key === "Delete") {
-      event.preventDefault();
+      handle();
       deleteSelectedNote();
       return;
     }
     if (event.key === "Backspace" && selectedNote) {
-      event.preventDefault();
+      handle();
       setCellFret(selectedCell.onset, selectedCell.string, Math.floor(selectedNote.fret / 10));
       digitBufferRef.current = null;
       return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      if (dirty && !busy) void onSave(measureNumber, events);
+      handle();
+      void saveDraft();
       return;
     }
     const shortcut = TECHNIQUES.find((technique) => technique.shortcut.toLowerCase() === event.key.toLowerCase());
     if (shortcut) {
-      event.preventDefault();
+      handle();
       applyTechnique(shortcut.id);
     } else if (event.key === "Escape") {
+      event.stopPropagation();
       setArmedTechnique(null);
+    }
+  }
+
+  function changeMeasure(nextMeasure: number) {
+    if (!dirty || window.confirm("当前小节还有未保存修改。确定切换并丢弃这些修改吗？")) onMeasureChange(nextMeasure);
+  }
+
+  async function saveDraft() {
+    if (!dirty || busy || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    try {
+      await onSave(measureNumber, events);
+    } finally {
+      saveInFlightRef.current = false;
     }
   }
 
@@ -219,8 +253,8 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
   }
 
   return (
-    <div className="score-review-shell">
-      <section className="review-source-panel">
+    <div className={`score-review-shell ${embedded ? "embedded" : ""}`}>
+      {!embedded && <section className="review-source-panel">
         <div className="review-panel-heading">
           <div><span>ORIGINAL FRAME</span><h3>原视频帧对照</h3></div>
           {sourceFrame && <div className="frame-time-badge"><Clock3 size={13} /> {formatTime(sourceFrame.time_seconds)} · {sourceFrame.time_seconds.toFixed(3)}s</div>}
@@ -232,14 +266,15 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
           </figure>
         ) : <div className="review-empty-frame">没有找到这个小节对应的原始切片</div>}
         <p className="review-guidance">左边保留原图证据；右边点击六线格后直接按数字键修改品位。保存会重建 MusicXML，不改动原始切片和完整 PDF。</p>
-      </section>
+      </section>}
 
-      <section className="review-editor-panel">
+      <section className="review-editor-panel" aria-busy={busy}>
+        <fieldset className="review-editor-lock" disabled={busy}>
         <div className="measure-navigator">
-          <button type="button" disabled={measureNumber <= startMeasure} onClick={() => onMeasureChange(measureNumber - 1)} aria-label="上一小节"><ChevronLeft size={17} /></button>
-          <label><span>小节</span><input type="number" min={startMeasure} max={endMeasure} value={measureNumber} onChange={(event) => onMeasureChange(clamp(Number(event.target.value), startMeasure, endMeasure))} /></label>
+          <button type="button" disabled={measureNumber <= startMeasure} onClick={() => changeMeasure(measureNumber - 1)} aria-label="上一小节"><ChevronLeft size={17} /></button>
+          <label><span>小节</span><input type="number" min={startMeasure} max={endMeasure} value={measureNumber} onChange={(event) => changeMeasure(clamp(Number(event.target.value), startMeasure, endMeasure))} /></label>
           <small>{startMeasure}–{endMeasure}</small>
-          <button type="button" disabled={measureNumber >= endMeasure} onClick={() => onMeasureChange(measureNumber + 1)} aria-label="下一小节"><ChevronRight size={17} /></button>
+          <button type="button" disabled={measureNumber >= endMeasure} onClick={() => changeMeasure(measureNumber + 1)} aria-label="下一小节"><ChevronRight size={17} /></button>
         </div>
 
         <div className="tab-edit-workbench">
@@ -257,7 +292,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
               <div><span>8TH-NOTE GRID</span><strong>点击弦格，键盘输入品位</strong></div>
               <small>{selectedNote ? `${selectedCell.string} 弦 · ${selectedNote.fret} 品` : `${selectedCell.string} 弦 · 空位`}</small>
             </div>
-            <div className="tab-entry-grid" ref={gridRef} tabIndex={0} onKeyDown={handleGridKeyDown} aria-label="六线 TAB 键盘编辑器">
+            <div className="tab-entry-grid" ref={gridRef} tabIndex={0} data-shortcut-scope="review" onKeyDown={handleGridKeyDown} aria-label="六线 TAB 键盘编辑器">
               <div className="tab-corner">TAB</div>
               {Array.from({ length: 8 }, (_, onset) => <div className="tab-beat-label" key={`beat-${onset}`}>{Math.floor(onset / 2) + 1}{onset % 2 ? "&" : ""}</div>)}
               {Array.from({ length: 6 }, (_, row) => row + 1).map((string) => (
@@ -309,8 +344,9 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, on
 
         <footer className="review-actions">
           <button type="button" className="secondary-button" onClick={addEvent}><Plus size={15} /> 添加事件</button>
-          <button type="button" className="primary-button" disabled={!dirty || busy} onClick={() => onSave(measureNumber, events)}><Save size={15} /> {busy ? "正在保存…" : "保存并重建乐谱"}</button>
+          <button type="button" className="primary-button" disabled={!dirty || busy} onClick={() => void saveDraft()}><Save size={15} /> {busy ? "正在保存…" : "保存并重建乐谱"}</button>
         </footer>
+        </fieldset>
       </section>
     </div>
   );

@@ -461,9 +461,15 @@ function ProjectWorkspace({
   const [scoreVolume, setScoreVolume] = useState(0.72);
   const [audioSource, setAudioSource] = useState<"uploaded" | "video">("uploaded");
   const [recognition, setRecognition] = useState<RecognitionDiagnostics | null>(null);
+  const [recognitionLoadError, setRecognitionLoadError] = useState<string | null>(null);
+  const [recognitionRetry, setRecognitionRetry] = useState(0);
+  const [scoreRevision, setScoreRevision] = useState("");
+  const [scoreDirty, setScoreDirty] = useState(false);
+  const [reviewDirty, setReviewDirty] = useState(false);
   const [reviewMeasure, setReviewMeasure] = useState(1);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
-  const [viewMode, setViewMode] = useState<"video" | "frames" | "images" | "score" | "review">("video");
+  const [viewMode, setViewMode] = useState<"video" | "frames" | "images" | "score">("video");
   const audioRef = useRef<HTMLAudioElement>(null);
   const initializedViewRef = useRef(false);
   const previousStatusRef = useRef<string | null>(null);
@@ -471,9 +477,11 @@ function ProjectWorkspace({
 
   const refresh = async () => {
     const value = await api.project(projectId);
+    const previousStatus = previousStatusRef.current;
     setProject(value);
     setTitle(value.title);
     if (!initializedViewRef.current) {
+      setScoreRevision(value.updated_at);
       setViewMode(
         value.score_file_url
           ? "score"
@@ -484,8 +492,15 @@ function ProjectWorkspace({
           : "video"
       );
       initializedViewRef.current = true;
-    } else if (previousStatusRef.current === "analyzing" && value.video_frames.length) {
+    } else if (previousStatus === "analyzing" && value.video_frames.length) {
       setViewMode("frames");
+    }
+    if (previousStatus === "recognizing" && value.status !== "recognizing" && value.score_file_url) {
+      setScoreRevision(value.updated_at);
+      setRecognition(null);
+      setRecognitionLoadError(null);
+      setReviewDirty(false);
+      setReviewOpen(false);
     }
     previousStatusRef.current = value.status;
     setMeasure(Math.max(1, ...value.sync_points.map((point) => point.measure_number + 1)));
@@ -496,6 +511,12 @@ function ProjectWorkspace({
     initializedViewRef.current = false;
     previousStatusRef.current = null;
     setRecognition(null);
+    setRecognitionLoadError(null);
+    setRecognitionRetry(0);
+    setScoreRevision("");
+    setScoreDirty(false);
+    setReviewDirty(false);
+    setReviewOpen(false);
     setLoading(true);
     refresh()
       .catch((error) => showNotice({ message: error.message, tone: "error" }))
@@ -516,11 +537,45 @@ function ProjectWorkspace({
     setAudioSource(project?.audio_url ? "uploaded" : "video");
   }, [project?.audio_url]);
 
+  useEffect(() => {
+    if (!scoreDirty && !reviewDirty) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [reviewDirty, scoreDirty]);
+
+  useEffect(() => {
+    if (!project || action === "recognize" || project.status === "recognizing" || viewMode !== "score" || recognition || project.recognition_summary?.engine !== "tab_cv_tesseract") return;
+    let active = true;
+    setRecognitionLoadError(null);
+    api.recognition(project.id)
+      .then((diagnostics) => {
+        if (!active) return;
+        setRecognition(diagnostics);
+        setReviewMeasure(diagnostics.summary.start_measure ?? diagnostics.measures[0]?.number ?? 1);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setRecognitionLoadError(error instanceof Error ? error.message : "校对数据载入失败");
+      });
+    return () => { active = false; };
+  }, [action, project?.id, project?.recognition_summary?.engine, project?.status, recognition, recognitionRetry, viewMode]);
+
   async function run(key: string, operation: () => Promise<unknown>, success?: string) {
+    if (key === "recognize") {
+      setRecognition(null);
+      setRecognitionLoadError(null);
+      setReviewDirty(false);
+      setReviewOpen(false);
+    }
     setAction(key);
     try {
       await operation();
       const refreshed = await refresh();
+      if (key === "score") setScoreRevision(refreshed.updated_at);
       if (key === "analyze" && refreshed.status !== "analyzing" && refreshed.video_frames.length) {
         setViewMode("frames");
       }
@@ -552,7 +607,8 @@ function ProjectWorkspace({
         if (frame.start_measure !== null) target = frame.start_measure + (frame.highlighted_index ?? 0);
       }
       setReviewMeasure(target);
-      setViewMode("review");
+      setViewMode("score");
+      setReviewOpen(true);
     } catch (error) {
       showNotice({ message: error instanceof Error ? error.message : "无法打开识别校对", tone: "error" });
     } finally {
@@ -566,13 +622,94 @@ function ProjectWorkspace({
     try {
       const diagnostics = await api.updateRecognitionMeasure(project.id, measureNumber, events);
       setRecognition(diagnostics);
-      await refresh();
+      const refreshed = await refresh();
+      setScoreRevision(refreshed.updated_at);
       showNotice({ message: `第 ${measureNumber} 小节已保存并重新生成乐谱`, tone: "success" });
     } catch (error) {
       showNotice({ message: error instanceof Error ? error.message : "小节保存失败", tone: "error" });
     } finally {
       setAction(null);
     }
+  }
+
+  async function saveRecognitionChanges(changes: Array<{ measure: number; events: RecognitionEvent[] }>) {
+    if (!project || !changes.length) return;
+    setAction("review-save");
+    try {
+      let diagnostics = recognition;
+      for (const change of changes) {
+        diagnostics = await api.updateRecognitionMeasure(project.id, change.measure, change.events);
+      }
+      setRecognition(diagnostics);
+      const refreshed = await refresh();
+      setScoreRevision(refreshed.updated_at);
+      showNotice({ message: `已保存 ${changes.length} 个小节并重新生成乐谱`, tone: "success" });
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "乐谱保存失败", tone: "error" });
+      throw error;
+    } finally {
+      setAction(null);
+    }
+  }
+
+  async function saveEditedScore(file: File) {
+    if (!project) return;
+    setAction("score-save");
+    try {
+      await api.uploadScore(project.id, file);
+      const refreshed = await refresh();
+      setScoreRevision(refreshed.updated_at);
+      showNotice({ message: "当前校对版本已保存到私人曲库", tone: "success" });
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "乐谱保存失败", tone: "error" });
+      throw error;
+    } finally {
+      setAction(null);
+    }
+  }
+
+  function confirmDiscardScoreChanges() {
+    return !(scoreDirty || reviewDirty) || window.confirm("谱面还有未保存修改。确定离开并丢弃这些修改吗？");
+  }
+
+  function closeReview() {
+    if (!reviewDirty || window.confirm("精确网格还有未保存修改。确定关闭并丢弃这些修改吗？")) setReviewOpen(false);
+  }
+
+  function changeView(next: "video" | "frames" | "images" | "score") {
+    if (next === viewMode) return;
+    if (!confirmDiscardScoreChanges()) return;
+    if (next !== "score") {
+      setScoreDirty(false);
+      setReviewDirty(false);
+      setReviewOpen(false);
+    }
+    setViewMode(next);
+  }
+
+  function leaveProject() {
+    if (confirmDiscardScoreChanges()) onBack();
+  }
+
+  function uploadScoreImages(files: FileList) {
+    if (!confirmDiscardScoreChanges()) return;
+    void run("images", async () => {
+      await api.uploadImages(projectId, files);
+      setScoreDirty(false);
+      setViewMode("images");
+    }, "PDF 已生成");
+  }
+
+  function importScore(file: File) {
+    if (!confirmDiscardScoreChanges()) return;
+    void run("score", async () => {
+      await api.uploadScore(projectId, file);
+      setScoreDirty(false);
+      setReviewDirty(false);
+      setReviewOpen(false);
+      setRecognition(null);
+      setViewMode("score");
+    }, "结构化乐谱已载入");
   }
 
   function currentScorePosition() {
@@ -624,19 +761,17 @@ function ProjectWorkspace({
       ? "视频选段与谱面框选"
       : viewMode === "frames"
       ? "切片候选帧"
-      : viewMode === "review"
-      ? "原帧与识别谱校对"
       : viewMode === "score"
-      ? "可播放乐谱"
+      ? "编辑、校对与播放"
       : "谱面校准";
 
   return (
     <main className="workspace-shell">
       <header className="workspace-topbar">
-        <button type="button" className="back-button" onClick={onBack}><ArrowLeft size={17} /> 曲库</button>
+        <button type="button" className="back-button" onClick={leaveProject}><ArrowLeft size={17} /> 曲库</button>
         <div className="workspace-title">
           <input value={title} onChange={(event) => setTitle(event.target.value)} onBlur={saveTitle} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label="项目名称" />
-          <span><Save size={12} /> {action === "rename" ? "正在保存" : "自动保存到私人曲库"}</span>
+          <span><Save size={12} /> {action === "rename" ? "正在保存" : scoreDirty ? "谱面有修改 · Ctrl/⌘S 保存" : reviewDirty ? "精确校对有未保存修改" : "项目已保存到私人曲库"}</span>
         </div>
         <div className={`workspace-status ${project.status}`}><i />{STATUS_LABELS[project.status] ?? project.status}</div>
       </header>
@@ -665,21 +800,20 @@ function ProjectWorkspace({
             <div className="stage-actions">
               {(project.video_url || project.video_frames.length > 0 || project.score_images.length > 0 || project.score_file_url) && (
                 <div className="small-segmented">
-                  {project.video_url && <button type="button" className={viewMode === "video" ? "active" : ""} onClick={() => setViewMode("video")}>选段</button>}
-                  {project.video_frames.length > 0 && <button type="button" className={viewMode === "frames" ? "active" : ""} onClick={() => setViewMode("frames")}>切片</button>}
-                  {project.score_images.length > 0 && <button type="button" className={viewMode === "images" ? "active" : ""} onClick={() => setViewMode("images")}>谱图</button>}
-                  {project.score_file_url && <button type="button" className={viewMode === "score" ? "active" : ""} onClick={() => setViewMode("score")}>可播放谱</button>}
-                  {canReview && <button type="button" className={viewMode === "review" ? "active" : ""} onClick={() => void openReviewAt()}>校对</button>}
+                  {project.video_url && <button type="button" className={viewMode === "video" ? "active" : ""} onClick={() => changeView("video")}>选段</button>}
+                  {project.video_frames.length > 0 && <button type="button" className={viewMode === "frames" ? "active" : ""} onClick={() => changeView("frames")}>切片</button>}
+                  {project.score_images.length > 0 && <button type="button" className={viewMode === "images" ? "active" : ""} onClick={() => changeView("images")}>谱图</button>}
+                  {project.score_file_url && <button type="button" className={viewMode === "score" ? "active" : ""} onClick={() => changeView("score")}>编辑与播放</button>}
                 </div>
               )}
-              {project.pdf_url && <a className="quiet-button" href={`${project.pdf_url}?download=1`} download><FileText size={15} /> 导出 PDF</a>}
-              <label className="quiet-button file-label"><ImagePlus size={15} /> 上传谱图<input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) run("images", async () => { await api.uploadImages(project.id, event.target.files!); setViewMode("images"); }, "PDF 已生成"); event.currentTarget.value = ""; }} /></label>
-              <label className="quiet-button file-label"><FileMusic size={15} /> 导入乐谱<input type="file" accept=".gp,.gp3,.gp4,.gp5,.gpx,.musicxml,.xml,.mxl" onChange={(event) => { const file = event.target.files?.[0]; if (file) run("score", async () => { await api.uploadScore(project.id, file); setViewMode("score"); }, "结构化乐谱已载入"); event.currentTarget.value = ""; }} /></label>
+              {viewMode !== "score" && project.pdf_url && <a className="quiet-button" href={`${project.pdf_url}?download=1`} download><FileText size={15} /> 导出 PDF</a>}
+              <label className="quiet-button file-label"><ImagePlus size={15} /> 上传谱图<input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) uploadScoreImages(event.target.files); event.currentTarget.value = ""; }} /></label>
+              <label className="quiet-button file-label"><FileMusic size={15} /> 导入乐谱<input type="file" accept=".gp,.gp3,.gp4,.gp5,.gpx,.musicxml,.xml,.mxl" onChange={(event) => { const file = event.target.files?.[0]; if (file) importScore(file); event.currentTarget.value = ""; }} /></label>
             </div>
           </div>
 
           <div
-            className={`score-viewport ${viewMode === "video" ? "video-workspace" : !hasVisualScore && !project.video_frames.length ? "empty" : ""}`}
+            className={`score-viewport ${viewMode === "video" ? "video-workspace" : ""} ${viewMode === "score" ? "score-workspace" : ""} ${!hasVisualScore && !project.video_frames.length ? "empty" : ""}`}
             ref={viewportCallback}
             onPointerDown={() => follow && setFollow(false)}
           >
@@ -707,19 +841,58 @@ function ProjectWorkspace({
                   </figure>
                 ))}
               </div>
-            ) : viewMode === "review" && recognition ? (
-              <ScoreReviewPanel
-                project={project}
-                diagnostics={recognition}
-                measureNumber={reviewMeasure}
-                busy={action === "review-save"}
-                onMeasureChange={setReviewMeasure}
-                onSave={saveReviewedMeasure}
-              />
             ) : viewMode === "score" && project.score_file_url ? (
-              <Suspense fallback={<div className="score-loading"><LoaderCircle size={20} className="spin" /> 正在载入乐谱引擎</div>}>
-                <AlphaTabPlayer scoreUrl={`${project.score_file_url}?v=${encodeURIComponent(project.updated_at)}`} scrollElement={viewport} masterVolume={scoreVolume} fileBaseName={project.title} />
-              </Suspense>
+              <div className={`unified-score-studio ${reviewOpen ? "review-open" : ""}`}>
+                {canReview && !recognition ? (
+                  <div className="score-loading">
+                    {recognitionLoadError ? (
+                      <><span>校对数据载入失败：{recognitionLoadError}</span><button type="button" className="quiet-button" onClick={() => setRecognitionRetry((value) => value + 1)}>重试</button></>
+                    ) : <><LoaderCircle size={20} className="spin" /> 正在载入可保存的校对数据</>}
+                  </div>
+                ) : (
+                  <Suspense fallback={<div className="score-loading"><LoaderCircle size={20} className="spin" /> 正在载入乐谱引擎</div>}>
+                    <AlphaTabPlayer
+                    scoreUrl={`${project.score_file_url}?v=${encodeURIComponent(scoreRevision || project.score_file_url)}`}
+                    scrollElement={viewport}
+                    masterVolume={scoreVolume}
+                    fileBaseName={project.title}
+                    pdfUrl={project.pdf_url}
+                    videoUrl={project.video_url}
+                    syncPoints={project.sync_points}
+                    videoFrames={project.video_frames}
+                    recognition={recognition}
+                    reviewOpen={reviewOpen}
+                    editingDisabled={reviewOpen || action === "recognize" || project.status === "recognizing"}
+                    onToggleReview={() => {
+                      if (scoreDirty && !reviewOpen) showNotice({ message: "请先保存谱面修改，再打开精确网格校对", tone: "error" });
+                      else if (reviewOpen) closeReview();
+                      else void openReviewAt();
+                    }}
+                    onFocusMeasure={(nextMeasure) => {
+                      if (!reviewOpen || !reviewDirty) setReviewMeasure(nextMeasure);
+                    }}
+                    onDirtyChange={setScoreDirty}
+                    onSaveScore={saveEditedScore}
+                    onSaveRecognition={saveRecognitionChanges}
+                    />
+                  </Suspense>
+                )}
+                {reviewOpen && recognition && (
+                  <aside className="inline-review-dock" aria-label="精确网格校对">
+                    <header><div><span>DETAIL EDITOR</span><strong>精确网格校对</strong></div><button type="button" onClick={closeReview} aria-label="关闭精确校对">×</button></header>
+                    <ScoreReviewPanel
+                      embedded
+                      project={project}
+                      diagnostics={recognition}
+                      measureNumber={reviewMeasure}
+                      busy={action === "review-save"}
+                      onMeasureChange={setReviewMeasure}
+                      onDirtyChange={setReviewDirty}
+                      onSave={saveReviewedMeasure}
+                    />
+                  </aside>
+                )}
+              </div>
             ) : viewMode === "images" && project.score_images.length ? (
               <div className="score-pages">
                 {project.score_images.map((image, index) => (
@@ -730,14 +903,14 @@ function ProjectWorkspace({
                 ))}
               </div>
             ) : project.video_url ? (
-              <div className="video-waiting"><Scissors size={28} /><h3>视频已经准备好</h3><p>切换到“选段”，设置开始与结束时间，再在画面上框选谱面区域。</p><button className="primary-button" type="button" onClick={() => setViewMode("video")}>开始选段</button></div>
+              <div className="video-waiting"><Scissors size={28} /><h3>视频已经准备好</h3><p>切换到“选段”，设置开始与结束时间，再在画面上框选谱面区域。</p><button className="primary-button" type="button" onClick={() => changeView("video")}>开始选段</button></div>
             ) : (
               <label className="score-dropzone">
                 <span className="drop-icon"><Upload size={24} /></span>
                 <h3>先解析并获取视频</h3>
                 <p>视频准备完成后，这里会出现时间范围、画面框选和抽帧间隔工具；也可以直接上传谱图。</p>
                 <strong>{action === "images" ? "正在生成 PDF…" : "选择谱图"}</strong>
-                <input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) run("images", async () => { await api.uploadImages(project.id, event.target.files!); setViewMode("images"); }, "PDF 已生成"); event.currentTarget.value = ""; }} />
+                <input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) uploadScoreImages(event.target.files); event.currentTarget.value = ""; }} />
               </label>
             )}
           </div>
@@ -779,7 +952,7 @@ function ProjectWorkspace({
             <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>乐谱识别</h3><p>{project.video_frames.length ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
             <p className="inspector-copy">{project.video_frames.length ? "从原始切片识别弦号、品位和八分音符网格，按小节号去重合成完整 PDF；校对器可用数字键改品位，并添加连音、滑音、击勾弦、推弦等技巧。" : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
             {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 数字置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}</p>}
-            <button className="secondary-button full" type="button" disabled={action === "recognize" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
+            <button className="secondary-button full" type="button" title={scoreDirty || reviewDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || reviewDirty || action === "recognize" || project.status === "recognizing" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
               {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
               {project.video_frames.length ? (capabilities.tab_ocr ? "识别视频六线 TAB" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}
             </button>

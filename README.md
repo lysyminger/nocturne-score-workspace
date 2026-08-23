@@ -24,8 +24,11 @@ Nocturne 是一个本地优先的音乐练习工作台。它把 Bilibili 视频�
 - 用 OpenCV + Tesseract 识别固定位置、清晰数字排版的六线 TAB；
 - 对重复出现的小节投票，每小节保留质量最佳的来源裁图并重排 PDF；
 - 导出并保存可播放的 MusicXML 草稿；
-- 从网页版导出完整 PDF、Guitar Pro 7 `.gp`、标准 MIDI 和合成 WAV；
+- 在同一个编辑工作台导出完整 PDF、Guitar Pro 7 `.gp`、标准 MIDI 和合成 WAV；
 - 用 alphaTab 渲染谱面，用 FluidSynth + SoundFont 合成试听；
+- 直接在渲染谱面上单选、连续多选或离散多选音符，批量修改品位、换弦和常用技巧；
+- 用 `Space` 统一播放/暂停，以 `Ctrl/Cmd+E` 打开选区命令面板，并支持撤销和保存快捷键；
+- 把原视频或当前小节原帧放进可拖动、可放大的非模态参考窗，按同步点跟随谱面播放；
 - 在原视频帧旁通过六线网格和数字键修改 `0–36` 品；
 - 手动添加连音、滑音、击弦、勾弦、推弦、颤音、泛音、闷音、延音和死音；
 - 分析视频原声或上传音频的速度、起音和 A/B/C 段落候选；
@@ -37,7 +40,7 @@ Nocturne 是一个本地优先的音乐练习工作台。它把 Bilibili 视频�
 
 - 从混合音乐中可靠分离并还原完整吉他、贝斯、钢琴、鼓和人声谱；
 - 自动判断所有推弦、击勾弦、滑音、泛音和复杂节奏；
-- 完整支持变拍号、三连音、多声部和非标准调弦编辑；
+- 像 Guitar Pro 一样完整增删拍、编辑变拍号、三连音、多声部和任意复杂结构；
 - 直接生成 MP3、OGG 或 Musepack `.mpc` 压缩音频（当前先导出标准 PCM WAV）；
 - 把音频段落自动命名为确定的主歌、副歌或桥段；
 - 提供公开社区、评论、收藏、审核和版权投诉系统；
@@ -58,9 +61,9 @@ Bilibili 链接 / BV / AV
         ↓
 六线 TAB 识别 + 重复小节投票 + 重排 PDF
         ↓
-MusicXML + alphaTab/FluidSynth 试听
+MusicXML + alphaTab/FluidSynth 编辑与试听
         ↓
-原帧对照、键盘改品位、手动补技巧
+谱面多选、原帧/视频对照、键盘改品位、批量补技巧
         ↓
 音频分析、同步点和滚动跟练
 ```
@@ -71,9 +74,9 @@ MusicXML + alphaTab/FluidSynth 试听
 React 19 + Vite + TypeScript
 ├─ 登录与私人曲库
 ├─ 视频选段、ROI 框选和候选帧
-├─ alphaTab 乐谱渲染、光标和滚动
+├─ alphaTab 乐谱渲染、音符命中边界、光标和滚动
 ├─ FluidSynth WebAssembly + SoundFont 播放
-├─ GTP 风格六线网格校对
+├─ GP8 风格选区、快捷命令和六线网格校对
 └─ 音频混音、分析与同步点
 
 FastAPI + SQLite
@@ -177,7 +180,33 @@ alphaTab 负责解析、排版、光标和播放事件；`js-synthesizer` 封装
 
 构建时，alphaTab Vite 插件会从固定版本依赖中提供 Bravura 字体和 SONiVOX SoundFont；`scripts/copy-audio-engine.mjs` 会复制 FluidSynth 浏览器运行时及其许可证。生成的二进制和运行文件不进入源码提交。
 
-进入“可播放谱”后，可在播放器底部导出 GP7、MIDI 和 WAV；PDF 使用工作台顶部的“导出 PDF”。WAV 在浏览器内离线合成，不会把乐谱上传给第三方服务。为避免手机或平板内存耗尽，单次 WAV 导出目前限制为 6 分钟。
+进入“编辑与播放”后，PDF、GP7、MIDI 和 WAV 都从谱面上方的统一“导出”菜单获取。WAV 在浏览器内离线合成，不会把乐谱上传给第三方服务。为避免手机或平板内存耗尽，单次 WAV 导出目前限制为 6 分钟。
+
+## 谱面直接编辑与快捷键
+
+这里借鉴 Guitar Pro 8 的“先建立选区，再对选区执行命令”逻辑，但没有把 alphaTab 描述成完整制谱器。alphaTab 负责解析、音符命中检测、渲染和播放；选区、命令事务、撤销、保存与识别结果映射由本项目实现。
+
+| 操作 | 结果 |
+| --- | --- |
+| 单击音符 | 只选择当前音符 |
+| `Ctrl/Cmd + 单击` | 添加或移除任意离散音符 |
+| `Shift + 单击` | 在同一谱表、同一声部内从锚点连续选择 |
+| 拖过音符 | 扩展连续选区 |
+| `0–9` | 给全部所选六线谱音符输入品位，支持两位数 |
+| `Alt + ↑/↓` | 在相邻弦保持音高换把位；自然泛音会安全跳过 |
+| `B/V/N/M/R/X` | 推弦、颤音、泛音、闷音、延音、死音 |
+| `L/S/H/P` | 对同一弦上的两个音应用连音、滑音、击弦、勾弦 |
+| `Delete` | 删除所选音符 |
+| `Ctrl/Cmd + E` | 打开选区命令面板 |
+| `Ctrl/Cmd + Z` | 撤销最近修改 |
+| `Ctrl/Cmd + S` | 保存当前校对版本 |
+| `Space` | 播放或暂停 |
+
+识别生成的谱会把受影响小节写回识别诊断并重新生成 MusicXML；用户导入的结构化谱则保存为兼容性更明确的 GP7 `.gp`。当前不生成或伪装成 GP8 原生文件。浮动视频同步至少需要两个“小节—视频秒数”同步点；没有同步点时仍可自由播放视频或查看大图。
+
+技巧键采用本项目容易记忆的分拆映射，并非逐键复制 Guitar Pro 8。识别草稿当前每个音符只能保存一个 `technique`，所以对同一音符连续应用多个效果时以后一次为准；导入的结构化谱不受这个单字段限制。统一菜单中的 PDF 是原视频谱图裁切合成版，数值校正会更新可播放谱，但不会改写已经生成的像素 PDF。
+
+交互参考：[Guitar Pro 8 用户手册](https://support.guitar-pro.com/hc/en-us/articles/5018404823069-GP8-Guitar-Pro-8-User-Guide)、[Guitar Pro 8 快捷键](https://support.guitar-pro.com/hc/en-us/articles/360001646978-GP8-List-of-keyboard-shortcuts)、[Guitar Pro 命令面板](https://www.guitar-pro.com/blog/p/54190-unlock-guitar-pro-tips-you-should-know)、[Guitar Pro 8 Audio Track](https://support.guitar-pro.com/hc/en-us/articles/7460696563357-GP8-How-to-use-the-Audio-Track)、[alphaTab 音符事件](https://alphatab.net/docs/reference/api/notemousedown)、[alphaTab 音视频同步](https://alphatab.net/docs/guides/audio-video-sync)。
 
 ## 乐谱识别边界
 

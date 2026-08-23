@@ -669,14 +669,30 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   animation: score-selection-in .16s cubic-bezier(.2,.8,.2,1);
 }
 .score-selection-layer i::after { content: ""; position: absolute; top: -3px; right: -3px; width: 5px; height: 5px; border-radius: 50%; background: #7268d9; box-shadow: 0 0 0 1px #fff; }
-.score-selection-layer .score-cell-cursor {
-  border-color: rgba(240,197,105,.95);
-  border-radius: .22rem;
-  background: rgba(240,197,105,.16);
-  box-shadow: 0 0 0 2px rgba(11,11,14,.82), 0 0 0 3px rgba(240,197,105,.35), 0 4px 16px rgba(127,88,25,.24);
+.score-selection-layer .score-grid-point {
+  position: absolute;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  pointer-events: auto;
+  background: rgba(112,99,218,.22);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.62);
+  cursor: crosshair;
+  transition: opacity .12s ease, transform .12s ease, background-color .12s ease;
 }
-.score-selection-layer .score-cell-cursor::before { content: ""; position: absolute; top: 50%; left: 3px; right: 3px; height: 1px; background: #f0c569; transform: translateY(-50%); }
-.score-selection-layer .score-cell-cursor::after { background: #f0c569; }
+.score-selection-layer .score-grid-point:hover { background: rgba(103,89,215,.72); transform: scale(1.35); }
+.score-selection-layer .score-grid-point:active { transform: scale(.9); }
+.score-selection-layer .score-cell-cursor {
+  z-index: 3;
+  border-color: rgba(113,101,222,.95);
+  border-radius: .22rem;
+  background: rgba(118,105,231,.13);
+  box-shadow: 0 0 0 2px rgba(255,255,255,.78), 0 0 0 4px rgba(112,99,218,.2), 0 4px 16px rgba(74,61,181,.24);
+}
+.score-selection-layer .score-cell-cursor::before { content: ""; position: absolute; top: 50%; left: 3px; right: 3px; height: 1px; background: #7268d9; transform: translateY(-50%); }
+.score-selection-layer .score-cell-cursor::after { background: #7268d9; }
+.score-selection-layer .score-cell-cursor > b { position: absolute; left: 50%; bottom: calc(100% + .1rem); color: rgba(102,102,110,.68); font: 500 1rem/1 "Bravura", "Segoe UI Symbol", serif; text-shadow: 0 1px rgba(255,255,255,.78); transform: translateX(-50%); }
 .score-selection-layer .measure-error-marker {
   border: 1.5px solid rgba(229,82,91,.82);
   border-radius: .42rem;

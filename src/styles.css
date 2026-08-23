@@ -669,22 +669,6 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   animation: score-selection-in .16s cubic-bezier(.2,.8,.2,1);
 }
 .score-selection-layer i::after { content: ""; position: absolute; top: -3px; right: -3px; width: 5px; height: 5px; border-radius: 50%; background: #7268d9; box-shadow: 0 0 0 1px #fff; }
-.score-selection-layer .score-grid-point {
-  position: absolute;
-  z-index: 1;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  pointer-events: auto;
-  background: rgba(112,99,218,.22);
-  box-shadow: 0 0 0 1px rgba(255,255,255,.62);
-  cursor: crosshair;
-  touch-action: none;
-  user-select: none;
-  transition: opacity .12s ease, transform .12s ease, background-color .12s ease;
-}
-.score-selection-layer .score-grid-point:hover { background: rgba(103,89,215,.72); transform: scale(1.35); }
-.score-selection-layer .score-grid-point:active { transform: scale(.9); }
 .score-selection-layer .score-cell-cursor {
   z-index: 3;
   border-color: rgba(113,101,222,.95);

@@ -1791,21 +1791,42 @@ export function AlphaTabPlayer({
     if (!current) return;
     let target: alphaTab.model.Note | null = null;
     if (horizontal) {
-      let beat: alphaTab.model.Beat | null = horizontal > 0 ? current.beat.nextBeat : current.beat.previousBeat;
-      for (let count = 0; beat && count < 128; count += 1) {
-        if (beat.voice.index === current.beat.voice.index && beat.voice.bar.staff === current.beat.voice.bar.staff && beat.notes.length) {
-          target = beat.notes.find((note) => note.string === current.string) ?? beat.notes[0];
-          break;
+      const beat = horizontal > 0 ? current.beat.nextBeat : current.beat.previousBeat;
+      if (beat && beat.voice.index === current.beat.voice.index && beat.voice.bar.staff === current.beat.voice.bar.staff) {
+        target = beat.getNoteOnString(current.string) ?? null;
+        if (!target && !extend) {
+          const onset = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+          const cursor = cursorAt(beat, onset, current.string);
+          if (cursor) {
+            setSelection([]);
+            scoreCursorRef.current = cursor;
+            setScoreCursor(cursor);
+            const stringCount = beat.voice.bar.staff.tuning.length || 6;
+            const visualString = stringCount + 1 - current.string;
+            setEditStatus(`${visualString} 弦 · 相邻拍为空 · 输入品位即可添加音符`);
+            return;
+          }
         }
-        beat = horizontal > 0 ? beat.nextBeat : beat.previousBeat;
       }
     } else if (vertical) {
-      const candidates = current.beat.notes
-        .filter((note) => vertical < 0 ? note.string < current.string : note.string > current.string)
-        .sort((left, right) => Math.abs(left.string - current.string) - Math.abs(right.string - current.string));
-      target = candidates[0] ?? null;
+      const stringCount = current.beat.voice.bar.staff.tuning.length || 6;
+      const nextString = current.string + (vertical < 0 ? 1 : -1);
+      if (nextString < 1 || nextString > stringCount) return setEditStatus(vertical < 0 ? "已经到达第 1 弦" : `已经到达第 ${stringCount} 弦`);
+      target = current.beat.getNoteOnString(nextString) ?? null;
+      if (!target && !extend) {
+        const onset = Math.round(current.beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+        const cursor = cursorAt(current.beat, onset, nextString);
+        if (cursor) {
+          setSelection([]);
+          scoreCursorRef.current = cursor;
+          setScoreCursor(cursor);
+          const visualString = stringCount + 1 - nextString;
+          setEditStatus(`${visualString} 弦 · 当前拍空位 · 输入品位会在同一拍增加和弦音`);
+          return;
+        }
+      }
     }
-    if (!target) return setEditStatus("这个方向没有其他可选音符");
+    if (!target) return setEditStatus(extend ? "空弦位不能加入多选；松开 Shift 后可移动过去并输入新音" : "这个方向已经到达谱面边界");
     if (extend) {
       const anchor = selectionAnchorRef.current ?? current;
       setSelection(noteRange(anchor, target), anchor);

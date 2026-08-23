@@ -8,6 +8,7 @@ __pycache__/
 data/
 .env
 .deploy/
+.diagnostics/
 public/font/
 public/soundfont/
 public/audio/*.js

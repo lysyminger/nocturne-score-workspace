@@ -21,6 +21,7 @@ from backend.tab_recognition import (
     assign_rhythm_units,
     create_blank_tab_score,
     detect_measure_boundaries,
+    detect_score_layout,
     detect_staff_lines,
     update_recognized_measure,
 )
@@ -39,6 +40,38 @@ def test_detects_six_line_staff_and_measure_bars():
 
     assert detected_lines == staff_lines
     assert np.allclose(boundaries, [10, 205, 400, 595, 790], atol=2)
+
+
+def test_detects_light_tab_lines_on_dark_video_overlay():
+    image = np.full((220, 800), 24, dtype=np.uint8)
+    staff_lines = [50, 68, 86, 104, 122, 140]
+    for y in staff_lines:
+        cv2.line(image, (0, y), (799, y), 232, 1)
+    for x in (10, 400, 790):
+        cv2.line(image, (x, 50), (x, 140), 232, 2)
+
+    layout = detect_score_layout(image)
+
+    assert layout.staff_lines == staff_lines
+    assert layout.layout == "tab_only"
+    assert layout.polarity == "light_on_dark"
+
+
+def test_detects_standard_notation_above_guitar_tab():
+    image = np.full((260, 800), 255, dtype=np.uint8)
+    notation_lines = [35, 45, 55, 65, 75]
+    tab_lines = [120, 138, 156, 174, 192, 210]
+    for y in [*notation_lines, *tab_lines]:
+        cv2.line(image, (0, y), (799, y), 205, 1)
+    for x in (10, 400, 790):
+        cv2.line(image, (x, 35), (x, 210), 0, 2)
+
+    layout = detect_score_layout(image)
+
+    assert layout.staff_lines == tab_lines
+    assert layout.notation_staff_lines == notation_lines
+    assert layout.layout == "staff_tab_pair"
+    assert layout.polarity == "dark_on_light"
 
 
 def test_reads_beamed_quarter_and_dotted_quarter_rhythm():
@@ -109,6 +142,14 @@ def test_measure_sequence_rejects_large_ocr_jump():
 
     starts = [frame.start_measure for frame in frames]
     assert starts == [10, 12, 14, 16]
+
+
+def test_measure_sequence_does_not_invent_zero_without_any_ocr_anchor():
+    frames = [_frame(0, [None, None]), _frame(2, [None, None])]
+
+    _smooth_frame_starts(frames)
+
+    assert [frame.start_measure for frame in frames] == [None, None]
 
 
 def test_musicxml_contains_playable_tab_technical_data(tmp_path):

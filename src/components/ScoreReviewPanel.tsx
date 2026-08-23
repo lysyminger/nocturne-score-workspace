@@ -121,18 +121,24 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
   const saveInFlightRef = useRef(false);
   const dragSelectionRef = useRef<{ pointerId: number; anchor: number } | null>(null);
   const baselineRef = useRef<RecognitionEvent[]>(cloneEvents(currentMeasure));
+  const loadedMeasureRef = useRef<number | null>(null);
 
   useEffect(() => {
+    const measureChanged = loadedMeasureRef.current !== measureNumber;
+    loadedMeasureRef.current = measureNumber;
+    if (!measureChanged && dirty && !saveInFlightRef.current) return;
     const nextEvents = cloneEvents(currentMeasure);
     setEvents(nextEvents);
     setDirty(false);
-    const firstNote = nextEvents[0]?.notes[0];
-    const firstOnset = nextEvents[0]?.onset_eighths ?? 0;
     baselineRef.current = copyEvents(nextEvents);
-    setSelectedCell({ onset: firstOnset, string: firstNote?.string ?? 1 });
-    setTimeSelection({ anchor: firstOnset, focus: firstOnset });
-    setEntryDuration(nextEvents[0]?.duration_eighths ?? 1);
-    setEditStatus("方向键逐格移动；数字只写入当前这一根弦");
+    if (measureChanged) {
+      const firstNote = nextEvents[0]?.notes[0];
+      const firstOnset = nextEvents[0]?.onset_eighths ?? 0;
+      setSelectedCell({ onset: firstOnset, string: firstNote?.string ?? 1 });
+      setTimeSelection({ anchor: firstOnset, focus: firstOnset });
+      setEntryDuration(nextEvents[0]?.duration_eighths ?? 1);
+      setEditStatus("方向键逐格移动；数字只写入当前这一根弦");
+    }
     setUndoStack([]);
     setRedoStack([]);
     digitBufferRef.current = null;
@@ -499,6 +505,11 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     digitBufferRef.current = null;
   }
 
+  function moveSelectionAndFocus(horizontal: number, vertical: number) {
+    moveSelection(horizontal, vertical);
+    window.requestAnimationFrame(() => gridRef.current?.focus({ preventScroll: true }));
+  }
+
   function handleGridKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (busy || saveInFlightRef.current) {
       if (event.code !== "Space") {
@@ -586,6 +597,26 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     }
   }
 
+  useEffect(() => {
+    if (!embedded) return;
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (gridRef.current?.contains(target)) return;
+      if (target?.closest("input, textarea, select, [contenteditable='true'], audio, video, a")) return;
+      const supported = /^\d$/.test(event.key)
+        || ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "+", "=", "-", "_", "Delete", "Backspace", "Enter"].includes(event.key)
+        || event.code === "NumpadDecimal"
+        || event.key === "Decimal"
+        || event.key === "."
+        || (event.ctrlKey || event.metaKey)
+        || TECHNIQUES.some((technique) => technique.shortcut.toLowerCase() === event.key.toLowerCase())
+        || event.key.toLowerCase() === "r";
+      if (supported) handleGridKeyDown(event as unknown as React.KeyboardEvent<HTMLDivElement>);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  });
+
   function changeMeasure(nextMeasure: number) {
     if (!dirty || window.confirm("当前小节还有未保存修改。确定切换并丢弃这些修改吗？")) onMeasureChange(nextMeasure);
   }
@@ -595,6 +626,11 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     saveInFlightRef.current = true;
     try {
       await onSave(measureNumber, events);
+      baselineRef.current = copyEvents(events);
+      setDirty(false);
+      setUndoStack([]);
+      setRedoStack([]);
+      setEditStatus(`第 ${measureNumber} 小节已保存；方向键和数字键可继续输入`);
     } finally {
       saveInFlightRef.current = false;
     }
@@ -732,10 +768,10 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
                 <button type="button" disabled={!selectedNote} onClick={deleteSelectedNote}>删除本弦</button>
               </form>
               <div className="cursor-pad" aria-label="六线谱光标方向键">
-                <button type="button" onClick={() => moveSelection(0, -1)} aria-label="上一根弦"><ChevronUp size={15} /></button>
-                <button type="button" onClick={() => moveSelection(-1, 0)} aria-label="前一个十六分位置"><ChevronLeft size={15} /></button>
-                <button type="button" onClick={() => moveSelection(0, 1)} aria-label="下一根弦"><ChevronDown size={15} /></button>
-                <button type="button" onClick={() => moveSelection(1, 0)} aria-label="后一个十六分位置"><ChevronRight size={15} /></button>
+                <button type="button" onClick={() => moveSelectionAndFocus(0, -1)} aria-label="上一根弦"><ChevronUp size={15} /></button>
+                <button type="button" onClick={() => moveSelectionAndFocus(-1, 0)} aria-label="前一个十六分位置"><ChevronLeft size={15} /></button>
+                <button type="button" onClick={() => moveSelectionAndFocus(0, 1)} aria-label="下一根弦"><ChevronDown size={15} /></button>
+                <button type="button" onClick={() => moveSelectionAndFocus(1, 0)} aria-label="后一个十六分位置"><ChevronRight size={15} /></button>
               </div>
             </div>
             <div

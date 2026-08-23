@@ -645,6 +645,8 @@ export function AlphaTabPlayer({
   const editingDisabledRef = useRef(editingDisabled);
   const savingRef = useRef(false);
   const onFocusMeasureRef = useRef(onFocusMeasure);
+  const preservedScrollTopRef = useRef(0);
+  const restoringScrollRef = useRef(false);
 
   const [ready, setReady] = useState(false);
   const [scoreReady, setScoreReady] = useState(false);
@@ -677,6 +679,15 @@ export function AlphaTabPlayer({
   }, [dirty, recognition]);
   useEffect(() => { referenceModeRef.current = referenceMode; }, [referenceMode]);
   useEffect(() => { editingDisabledRef.current = editingDisabled; }, [editingDisabled]);
+  useEffect(() => {
+    if (!scrollElement) return;
+    preservedScrollTopRef.current = scrollElement.scrollTop;
+    const rememberScroll = () => {
+      if (!restoringScrollRef.current) preservedScrollTopRef.current = scrollElement.scrollTop;
+    };
+    scrollElement.addEventListener("scroll", rememberScroll, { passive: true });
+    return () => scrollElement.removeEventListener("scroll", rememberScroll);
+  }, [scrollElement]);
   useEffect(() => { onFocusMeasureRef.current = onFocusMeasure; }, [onFocusMeasure]);
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
@@ -820,6 +831,7 @@ export function AlphaTabPlayer({
     setReady(false);
     setEngineMode(null);
     setLoading("正在载入乐谱…");
+    restoringScrollRef.current = true;
     setDirty(false);
     setHistory([]);
     historyBaseDirtyRef.current = false;
@@ -855,7 +867,13 @@ export function AlphaTabPlayer({
 
     attachEngine();
     api.renderStarted.on(() => !engineLoadingStarted && setLoading("正在排版乐谱…"));
-    api.renderFinished.on(() => window.requestAnimationFrame(updateSelectionMarkers));
+    api.renderFinished.on(() => window.requestAnimationFrame(() => {
+      updateSelectionMarkers();
+      if (scrollElement && restoringScrollRef.current) {
+        scrollElement.scrollTop = preservedScrollTopRef.current;
+        window.requestAnimationFrame(() => { restoringScrollRef.current = false; });
+      }
+    }));
     api.renderFinished.on(() => !engineLoadingStarted && setLoading("正在生成演奏数据…"));
     api.playerReady.on(attachEngine);
     api.scoreLoaded.on((score) => {
@@ -1126,6 +1144,9 @@ export function AlphaTabPlayer({
       note,
       target: recognitionDraftRef.current ? recognitionNote(note) : null
     }));
+    if (recognitionDraftRef.current && recognitionTargets.some(({ target }) => !target)) {
+      return setEditStatus("这个音符无法安全映射回保存草稿；请在已展开的六线网格中修改");
+    }
     if (recognitionDraftRef.current) {
       for (const { note, target } of recognitionTargets) {
         const previousTechnique = target?.note.technique;
@@ -1198,6 +1219,13 @@ export function AlphaTabPlayer({
     if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
     const selected = selectedNotesRef.current.filter((note) => note.isStringed);
     if (!selected.length) return setEditStatus("所选音符没有可编辑的品位");
+    const recognitionTargets = new Map(selected.map((note) => [
+      note,
+      recognitionDraftRef.current ? recognitionNote(note) : null
+    ]));
+    if (recognitionDraftRef.current && [...recognitionTargets.values()].some((target) => !target)) {
+      return setEditStatus("这个音符无法安全映射回保存草稿；请在已展开的六线网格中输入");
+    }
     dotGestureRef.current = null;
     const now = Date.now();
     const previous = digitBufferRef.current;
@@ -1212,7 +1240,7 @@ export function AlphaTabPlayer({
     const entry = continuing && digitHistoryEntryRef.current ? digitHistoryEntryRef.current : historyEntry("品位", selected);
     if (!continuing) digitHistoryEntryRef.current = entry;
     for (const note of selected) {
-      const target = recognitionNote(note);
+      const target = recognitionTargets.get(note);
       note.fret = fret;
       if (note.harmonicType !== alphaTab.model.HarmonicType.None) note.harmonicValue = harmonicValueForFret(fret);
       if (target) target.note.fret = fret;
@@ -1280,6 +1308,9 @@ export function AlphaTabPlayer({
     if (!accepted.size) return setEditStatus(selected.some((note) => note.harmonicType !== alphaTab.model.HarmonicType.None)
       ? "自然泛音不会自动换弦，请先关闭泛音或手动校对音高"
       : "相邻弦没有保持同音高的可用品位");
+    if (recognitionDraftRef.current && [...accepted].some(([note, proposal]) => !recognitionNote(note, proposal.originalString))) {
+      return setEditStatus("换弦无法安全映射回保存草稿；请在已展开的六线网格中移动");
+    }
     const projectedString = (note: alphaTab.model.Note) => accepted.get(note)?.nextString ?? note.string;
     const allNotes = flattenNotes(scoreRef.current!);
     const affectedLanes = [...accepted].map(([note, proposal]) => ({
@@ -1485,6 +1516,9 @@ export function AlphaTabPlayer({
     if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
     const selected = selectedNotesRef.current;
     if (!selected.length) return;
+    if (recognitionDraftRef.current && selected.some((note) => !recognitionNote(note))) {
+      return setEditStatus("删除无法安全映射回保存草稿；请在已展开的六线网格中删除");
+    }
     const entry = historyEntry("删除音符", selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;

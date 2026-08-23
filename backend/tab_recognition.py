@@ -78,6 +78,7 @@ class MeasureGeometry:
     label_image: np.ndarray | None
     raw_label: str | None = None
     raw_label_confidence: float = 0.0
+    label_alternates: list[np.ndarray] = field(default_factory=list)
 
 
 @dataclass
@@ -90,6 +91,9 @@ class ParsedFrame:
     highlighted_index: int | None
     start_measure: int | None = None
     start_measure_confidence: float = 0.0
+    layout: str = "tab_only"
+    polarity: str = "dark_on_light"
+    notation_staff_lines: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -140,29 +144,111 @@ def _group_runs(indices: np.ndarray) -> list[list[int]]:
     return groups
 
 
-def detect_staff_lines(gray: np.ndarray) -> list[int]:
-    height, width = gray.shape
-    row_counts = np.count_nonzero(gray < 245, axis=1)
-    groups = _group_runs(np.flatnonzero(row_counts >= width * 0.55))
-    centers = [round(statistics.mean(group)) for group in groups]
-    if len(centers) < 6:
+@dataclass(frozen=True)
+class ScoreLayout:
+    gray: np.ndarray
+    staff_lines: list[int]
+    notation_staff_lines: list[int] | None
+    layout: str
+    polarity: str
+
+
+def _local_foreground(gray: np.ndarray, polarity: str) -> tuple[np.ndarray, np.ndarray]:
+    source = gray.astype(np.float32)
+    background = cv2.GaussianBlur(source, (0, 0), sigmaX=3, sigmaY=3)
+    signal = source - background if polarity == "light_on_dark" else background - source
+    signal = np.maximum(signal, 0)
+    foreground = signal >= 4
+    return signal, foreground
+
+
+def _line_centers(signal: np.ndarray, foreground: np.ndarray) -> tuple[list[int], np.ndarray]:
+    width = foreground.shape[1]
+    coverage = np.count_nonzero(foreground, axis=1) / max(width, 1)
+    strength = np.mean(np.minimum(signal, 48), axis=1) + coverage * 12
+    groups = _group_runs(np.flatnonzero(coverage >= 0.45))
+    centers = [max(group, key=lambda y: float(strength[y])) for group in groups]
+    return centers, strength
+
+
+def _best_line_group(
+    centers: list[int], strength: np.ndarray, count: int, height: int
+) -> tuple[float, list[int]] | None:
+    best: tuple[float, list[int]] | None = None
+    for first_index, first in enumerate(centers):
+        for second in centers[first_index + 1 :]:
+            gap = second - first
+            if gap < 5 or gap > height / 4:
+                continue
+            candidate = [first, second]
+            last_index = centers.index(second)
+            for offset in range(2, count):
+                expected = first + gap * offset
+                options = [
+                    value
+                    for value in centers[last_index + 1 :]
+                    if abs(value - expected) <= max(2.0, gap * 0.28)
+                ]
+                if not options:
+                    break
+                value = min(options, key=lambda item: abs(item - expected))
+                candidate.append(value)
+                last_index = centers.index(value)
+            if len(candidate) != count:
+                continue
+            gaps = np.diff(candidate)
+            median_gap = float(np.median(gaps))
+            irregularity = float(np.mean(np.abs(gaps - median_gap)) / median_gap)
+            if irregularity > 0.22:
+                continue
+            average_strength = float(statistics.mean(float(strength[y]) for y in candidate))
+            score = average_strength - irregularity * 80
+            if best is None or score > best[0]:
+                best = (score, candidate)
+    return best
+
+
+def detect_score_layout(gray: np.ndarray) -> ScoreLayout:
+    height, _width = gray.shape
+    choices: list[tuple[float, str, list[int], np.ndarray, np.ndarray, list[int]]] = []
+    for polarity in ("dark_on_light", "light_on_dark"):
+        signal, foreground = _local_foreground(gray, polarity)
+        centers, strength = _line_centers(signal, foreground)
+        group = _best_line_group(centers, strength, 6, height)
+        if group:
+            choices.append((group[0], polarity, group[1], signal, foreground, centers))
+    if not choices:
         raise ValueError("没有检测到完整的六线 TAB，请重新框选六根弦线")
 
-    best: tuple[float, list[int]] | None = None
-    for start in range(len(centers) - 5):
-        candidate = centers[start : start + 6]
-        gaps = np.diff(candidate)
-        median_gap = float(np.median(gaps))
-        if median_gap < 5 or median_gap > height / 4:
-            continue
-        irregularity = float(np.mean(np.abs(gaps - median_gap)) / median_gap)
-        coverage = float(sum(row_counts[y] for y in candidate) / (6 * width))
-        score = irregularity - coverage * 0.05
-        if irregularity <= 0.25 and (best is None or score < best[0]):
-            best = (score, candidate)
-    if best is None:
-        raise ValueError("检测到横线，但无法组成间距稳定的六线 TAB")
-    return best[1]
+    _score, polarity, staff_lines, signal, foreground, centers = max(
+        choices, key=lambda item: item[0]
+    )
+    spacing = float(statistics.median(np.diff(staff_lines)))
+    notation_candidates = [value for value in centers if value < staff_lines[0] - spacing * 1.5]
+    notation_group = _best_line_group(notation_candidates, np.mean(np.minimum(signal, 48), axis=1) + np.mean(foreground, axis=1) * 12, 5, height)
+    notation_lines = notation_group[1] if notation_group else None
+    if notation_lines:
+        notation_spacing = float(statistics.median(np.diff(notation_lines)))
+        separation = staff_lines[0] - notation_lines[-1]
+        if not (spacing * 0.5 <= notation_spacing <= spacing * 1.6 and separation <= spacing * 12):
+            notation_lines = None
+
+    canonical = (
+        np.where(foreground, 0, 255).astype(np.uint8)
+        if polarity == "light_on_dark"
+        else gray.copy()
+    )
+    return ScoreLayout(
+        gray=canonical,
+        staff_lines=staff_lines,
+        notation_staff_lines=notation_lines,
+        layout="staff_tab_pair" if notation_lines else "tab_only",
+        polarity=polarity,
+    )
+
+
+def detect_staff_lines(gray: np.ndarray) -> list[int]:
+    return detect_score_layout(gray).staff_lines
 
 
 def _merge_nearby(values: list[int], distance: float) -> list[float]:
@@ -227,9 +313,23 @@ def extract_note_tokens(
     gray: np.ndarray, staff_lines: list[int]
 ) -> list[NoteToken]:
     spacing = float(statistics.median(np.diff(staff_lines)))
-    crop_top = max(0, round(staff_lines[0] - spacing * 0.55))
-    crop_bottom = min(gray.shape[0], round(staff_lines[-1] + spacing * 0.55) + 1)
-    symbols = ((gray[crop_top:crop_bottom] < 210) * 255).astype(np.uint8)
+    crop_top = max(0, round(staff_lines[0] - spacing * 0.7))
+    crop_bottom = min(gray.shape[0], round(staff_lines[-1] + spacing * 0.7) + 1)
+    symbols = ((gray[crop_top:crop_bottom] < 225) * 255).astype(np.uint8)
+    horizontal = cv2.morphologyEx(
+        symbols,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(8, round(spacing * 2.2)), 1),
+        ),
+    )
+    symbols = cv2.subtract(symbols, horizontal)
+    symbols = cv2.morphologyEx(
+        symbols,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)),
+    )
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(symbols)
 
     by_string: dict[int, list[tuple[int, int, int, int, int]]] = defaultdict(list)
@@ -240,9 +340,9 @@ def extract_note_tokens(
         if abs(staff_lines[string_index] - center_y) > spacing * 0.5:
             continue
         if not (
-            spacing * 0.15 <= width <= spacing * 0.85
-            and spacing * 0.58 <= height <= spacing * 1.18
-            and area >= spacing * spacing * 0.08
+            spacing * 0.1 <= width <= spacing * 0.95
+            and spacing * 0.4 <= height <= spacing * 1.25
+            and area >= spacing * spacing * 0.04
         ):
             continue
         by_string[string_index + 1].append((x, crop_top + local_y, width, height, area))
@@ -263,7 +363,10 @@ def extract_note_tokens(
         for group in groups:
             glyphs: list[DigitGlyph] = []
             for x, y, width, height, _area in group:
-                glyph_image = ((gray[y : y + height, x : x + width] < 210) * 255).astype(np.uint8)
+                glyph_image = symbols[
+                    max(0, y - crop_top) : max(0, y - crop_top) + height,
+                    x : x + width,
+                ]
                 glyphs.append(DigitGlyph(glyph_image, _glyph_feature(glyph_image)))
             left = min(item[0] for item in group)
             right = max(item[0] + item[2] for item in group)
@@ -382,17 +485,22 @@ def detect_highlighted_measure(
     return None
 
 
-def _clean_measure_label(
-    color: np.ndarray, left: float, staff_top: int, spacing: float
-) -> np.ndarray | None:
+def _clean_measure_labels(
+    color: np.ndarray,
+    canonical_gray: np.ndarray,
+    left: float,
+    staff_top: int,
+    spacing: float,
+    polarity: str,
+) -> list[np.ndarray]:
     gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-    x0 = max(0, round(left - spacing * 0.15))
-    x1 = min(gray.shape[1], round(left + spacing * 2.5))
+    x0 = max(0, round(left - spacing * 1.2))
+    x1 = min(gray.shape[1], round(left + spacing * 2.8))
     y0 = max(0, round(staff_top - spacing * 1.35))
     y1 = max(y0 + 1, round(staff_top - spacing * 0.05))
     crop = gray[y0:y1, x0:x1]
     if crop.size == 0:
-        return None
+        return []
     color_crop = color[y0:y1, x0:x1]
     blue, green, red = cv2.split(color_crop)
     red_pixels = (
@@ -400,41 +508,92 @@ def _clean_measure_label(
         & (red.astype(np.int16) > green.astype(np.int16) * 1.25 + 10)
         & (red.astype(np.int16) > blue.astype(np.int16) * 1.25 + 10)
     )
-    foreground = (red_pixels * 255).astype(np.uint8)
-    if np.count_nonzero(foreground) < 8:
-        foreground = ((crop < 210) * 255).astype(np.uint8)
+    thresholds = (120, 140, 160, 180, 200) if polarity == "dark_on_light" else (210,)
+    results: list[np.ndarray] = []
+    for threshold in thresholds:
+        base_foreground = (
+            crop < threshold
+            if polarity == "dark_on_light"
+            else canonical_gray[y0:y1, x0:x1] < threshold
+        )
+        foreground = ((base_foreground | red_pixels) * 255).astype(np.uint8)
         horizontal = cv2.morphologyEx(
             foreground,
             cv2.MORPH_OPEN,
             cv2.getStructuringElement(cv2.MORPH_RECT, (max(8, foreground.shape[1] // 3), 1)),
         )
         foreground = cv2.subtract(foreground, horizontal)
-    points = cv2.findNonZero(foreground)
-    if points is None:
-        return None
-    x, y, width, height = cv2.boundingRect(points)
-    if width < 2 or height < 3:
-        return None
-    return foreground[y : y + height, x : x + width]
+
+        # A measure number may sit just to either side of the bar line. Keep the
+        # generous horizontal crop, but remove full-height bar fragments. Dark
+        # video backgrounds also need tiny texture specks removed; light score
+        # paper keeps them because they can be real parts of an 11 px digit.
+        component_count, component_labels, component_stats, _centroids = cv2.connectedComponentsWithStats(
+            (foreground > 0).astype(np.uint8),
+            connectivity=8,
+        )
+        cleaned = np.zeros_like(foreground)
+        minimum_area = max(5, round(spacing * 0.25)) if polarity == "light_on_dark" else 1
+        for component_index in range(1, component_count):
+            _x, _y, component_width, component_height, area = component_stats[component_index]
+            is_bar_fragment = component_height >= spacing * 1.05 and component_width <= spacing * 0.5
+            if area < minimum_area or is_bar_fragment:
+                continue
+            cleaned[component_labels == component_index] = 255
+        if np.count_nonzero(cleaned) >= 8:
+            foreground = cleaned
+
+        points = cv2.findNonZero(foreground)
+        if points is None:
+            continue
+        x, y, width, height = cv2.boundingRect(points)
+        if width < 2 or height < 3:
+            continue
+        candidate = foreground[y : y + height, x : x + width]
+        if not any(candidate.shape == item.shape and np.array_equal(candidate, item) for item in results):
+            results.append(candidate)
+    return results
 
 
 def parse_frame(source: FrameInput) -> ParsedFrame:
     color = cv2.imread(str(source.path), cv2.IMREAD_COLOR)
     if color is None:
         raise ValueError(f"无法读取切片：{source.path.name}")
-    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-    staff_lines = detect_staff_lines(gray)
+    source_gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    layout = detect_score_layout(source_gray)
+    gray = layout.gray.copy()
+    channel_range = np.max(color, axis=2).astype(np.int16) - np.min(color, axis=2).astype(np.int16)
+    saturated_overlay = (channel_range >= 36) & (np.max(color, axis=2) >= 70)
+    gray[saturated_overlay] = 255
+    staff_lines = layout.staff_lines
     boundaries = detect_measure_boundaries(gray, staff_lines)
     spacing = float(statistics.median(np.diff(staff_lines)))
-    measures = [
-        MeasureGeometry(
-            left=left,
-            right=right,
-            label_image=_clean_measure_label(color, left, staff_lines[0], spacing),
+    label_staff_top = layout.notation_staff_lines[0] if layout.notation_staff_lines else staff_lines[0]
+    label_spacing = (
+        float(statistics.median(np.diff(layout.notation_staff_lines)))
+        if layout.notation_staff_lines
+        else spacing
+    )
+    measures: list[MeasureGeometry] = []
+    for left, right in zip(boundaries, boundaries[1:]):
+        if right - left < spacing * 4:
+            continue
+        label_images = _clean_measure_labels(
+            color,
+            gray,
+            left,
+            label_staff_top,
+            label_spacing,
+            layout.polarity,
         )
-        for left, right in zip(boundaries, boundaries[1:])
-        if right - left >= spacing * 4
-    ]
+        measures.append(
+            MeasureGeometry(
+                left=left,
+                right=right,
+                label_image=label_images[0] if label_images else None,
+                label_alternates=label_images[1:],
+            )
+        )
     if len(measures) < 2:
         raise ValueError("切片内可用的完整小节少于 2 个")
     effective_boundaries = [measures[0].left, *(measure.right for measure in measures)]
@@ -447,6 +606,9 @@ def parse_frame(source: FrameInput) -> ParsedFrame:
         measures=measures,
         tokens=tokens,
         highlighted_index=detect_highlighted_measure(gray, staff_lines, effective_boundaries),
+        layout=layout.layout,
+        polarity=layout.polarity,
+        notation_staff_lines=layout.notation_staff_lines,
     )
 
 
@@ -486,6 +648,9 @@ def _run_frame_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> N
     for index, measure in enumerate(frame.measures):
         if measure.label_image is not None:
             targets.append(("measure", index, measure.label_image))
+            targets.extend(
+                ("measure", index, alternate) for alternate in measure.label_alternates
+            )
     if not targets:
         return
 
@@ -540,6 +705,7 @@ def _run_frame_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> N
         if 0 <= target_row < len(targets):
             words_by_row[target_row].append((left, text, confidence))
 
+    measure_readings: dict[int, list[tuple[str, float]]] = defaultdict(list)
     for row_index, words in words_by_row.items():
         words.sort(key=lambda item: item[0])
         text = "".join(item[1] for item in words)
@@ -554,9 +720,45 @@ def _run_frame_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> N
                     glyph.raw_label = label
                     glyph.raw_confidence = confidence
         else:
-            measure = frame.measures[target_index]
-            measure.raw_label = text
-            measure.raw_label_confidence = confidence
+            if int(text) <= 1000:
+                measure_readings[target_index].append((text, confidence))
+
+    unique_readings: dict[int, dict[str, float]] = {
+        index: {
+            text: max(confidence for candidate, confidence in readings if candidate == text)
+            for text in {candidate for candidate, _confidence in readings}
+        }
+        for index, readings in measure_readings.items()
+    }
+    sequence_votes: dict[int, tuple[set[int], float]] = {}
+    for index, readings in unique_readings.items():
+        for text, confidence in readings.items():
+            start = int(text) - index
+            if start < 0:
+                continue
+            indices, weight = sequence_votes.setdefault(start, (set(), 0.0))
+            indices.add(index)
+            sequence_votes[start] = (indices, weight + max(10.0, confidence))
+
+    winning_start: int | None = None
+    if sequence_votes:
+        candidate_start, (indices, _weight) = max(
+            sequence_votes.items(),
+            key=lambda item: (len(item[1][0]), item[1][1]),
+        )
+        if len(indices) >= 2:
+            winning_start = candidate_start
+
+    for index, readings in unique_readings.items():
+        if winning_start is not None:
+            text = str(winning_start + index)
+            if text not in readings:
+                continue
+        else:
+            text = max(readings, key=lambda candidate: readings[candidate])
+        measure = frame.measures[index]
+        measure.raw_label = text
+        measure.raw_label_confidence = readings[text]
 
 
 @dataclass
@@ -669,6 +871,8 @@ def _smooth_frame_starts(frames: list[ParsedFrame]) -> None:
         for measure in frame.measures
         if measure.raw_label and measure.raw_label.isdigit() and int(measure.raw_label) <= 1000
     ]
+    if not observed:
+        return
     max_state = min(1000, max(256, (max(observed) if observed else 200) + 12))
     negative_infinity = -1e18
 
@@ -776,7 +980,13 @@ def _candidate_from_geometry(
         quality -= 12
     crop_box = (
         max(0, math.floor(geometry.left - spacing * 0.2)),
-        max(0, math.floor(frame.staff_lines[0] - spacing * 2.5)),
+        max(
+            0,
+            math.floor(
+                (frame.notation_staff_lines[0] if frame.notation_staff_lines else frame.staff_lines[0])
+                - spacing * 2.5
+            ),
+        ),
         min(frame.gray.shape[1], math.ceil(geometry.right + spacing * 0.2)),
         min(frame.gray.shape[0], math.ceil(frame.staff_lines[-1] + spacing * 3.0)),
     )
@@ -1201,25 +1411,40 @@ def recognize_tab_frames(
 
     start_measure, end_measure = min(usable), max(usable)
     gaps = [number for number in range(start_measure, end_measure + 1) if number not in usable]
-    glyph_confidences = [
-        glyph.confidence
-        for frame in parsed
-        for token in frame.tokens
-        for glyph in token.glyphs
-        if glyph.label
-    ]
-    confidence = statistics.mean(glyph_confidences) if glyph_confidences else 0.0
+    glyphs = [glyph for frame in parsed for token in frame.tokens for glyph in token.glyphs]
+    glyph_confidences = [glyph.confidence for glyph in glyphs if glyph.label]
+    recognized_glyphs = len(glyph_confidences)
+    total_glyphs = len(glyphs)
+    glyph_coverage = recognized_glyphs / total_glyphs if total_glyphs else 0.0
+    mean_glyph_confidence = statistics.mean(glyph_confidences) if glyph_confidences else 0.0
+    confidence = mean_glyph_confidence / 100 * glyph_coverage
     low_confidence = sum(value < 60 for value in glyph_confidences)
     warnings = [
         "当前按六弦标准调弦和 4/4 拍生成草稿；校对器支持细化到十六分音符网格",
         "技巧符号不会从视频中自动猜测，可在校对器中手动添加",
     ]
+    layout_counts = {
+        name: sum(frame.layout == name for frame in parsed)
+        for name in sorted({frame.layout for frame in parsed})
+    }
+    polarity_counts = {
+        name: sum(frame.polarity == name for frame in parsed)
+        for name in sorted({frame.polarity for frame in parsed})
+    }
+    if layout_counts.get("staff_tab_pair"):
+        warnings.append("已检测到上五线谱、下六线谱的联合谱；小节号与 PDF 裁切会保留上方五线谱")
+    if polarity_counts.get("light_on_dark"):
+        warnings.append("已对深色或半透明背景上的浅色谱线做自动反相与背景抑制")
     if pdf_error:
         warnings.append(f"按小节合成 PDF 失败，仍保留切片预览 PDF：{pdf_error}")
     if gaps:
         warnings.append(f"有 {len(gaps)} 个小节未获得可靠结果，已在导出谱中留空")
     if unresolved:
         warnings.append(f"有 {len(unresolved)} 张切片无法确定起始小节号")
+    if glyph_coverage < 0.75:
+        warnings.append(
+            f"仅有 {recognized_glyphs}/{total_glyphs} 个品位数字获得可用标签，置信度已按覆盖率折减"
+        )
 
     summary = {
         "engine": "tab_cv_tesseract",
@@ -1228,12 +1453,17 @@ def recognize_tab_frames(
         "start_measure": start_measure,
         "end_measure": end_measure,
         "estimated_tempo_bpm": round(tempo, 1),
-        "confidence": round(confidence / 100, 3),
+        "confidence": round(confidence, 3),
+        "glyph_coverage": round(glyph_coverage, 3),
+        "recognized_glyphs": recognized_glyphs,
+        "total_glyphs": total_glyphs,
         "low_confidence_glyphs": low_confidence,
         "parsed_frames": len(parsed),
         "failed_frames": len(parse_errors),
         "unresolved_frames": len(unresolved),
         "missing_measures": gaps,
+        "layout_counts": layout_counts,
+        "polarity_counts": polarity_counts,
         "warnings": warnings,
     }
     diagnostics = {
@@ -1248,6 +1478,8 @@ def recognize_tab_frames(
                 "start_measure_confidence": round(frame.start_measure_confidence, 1),
                 "highlighted_index": frame.highlighted_index,
                 "raw_measure_labels": [measure.raw_label for measure in frame.measures],
+                "layout": frame.layout,
+                "polarity": frame.polarity,
             }
             for frame in parsed
         ],

@@ -519,7 +519,7 @@ function ProjectWorkspace({
           ? "frames"
           : "video"
       );
-      if (value.recognition_summary?.engine === "tab_manual_editor") setReviewOpen(true);
+      if (["tab_cv_tesseract", "tab_manual_editor"].includes(value.recognition_summary?.engine ?? "")) setReviewOpen(true);
       initializedViewRef.current = true;
     } else if (previousStatus === "analyzing" && value.video_frames.length) {
       setViewMode("frames");
@@ -529,7 +529,7 @@ function ProjectWorkspace({
       setRecognition(null);
       setRecognitionLoadError(null);
       setReviewDirty(false);
-      setReviewOpen(false);
+      setReviewOpen(["tab_cv_tesseract", "tab_manual_editor"].includes(value.recognition_summary?.engine ?? ""));
     }
     previousStatusRef.current = value.status;
     setMeasure(Math.max(1, ...value.sync_points.map((point) => point.measure_number + 1)));
@@ -1032,7 +1032,7 @@ function ProjectWorkspace({
           <section className="inspector-section">
             <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>{isManualTab ? "乐谱结构" : "乐谱识别"}</h3><p>{isManualTab ? "可保存的六线谱事件模型" : project.video_frames.length ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
             <p className="inspector-copy">{isManualTab ? "同一时间格的六根弦可以组成和弦；删除只影响当前弦。音符、时值和技巧保存后会重建可播放的 MusicXML。" : project.video_frames.length ? "从原始切片识别弦号、品位和八分音符网格，按小节号去重合成完整 PDF；校对器可用数字键改品位，并添加连音、滑音、击勾弦、推弦等技巧。" : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
-            {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 数字置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}</p>}
+            {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 覆盖置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}{typeof project.recognition_summary.glyph_coverage === "number" ? ` · 数字覆盖 ${Math.round(project.recognition_summary.glyph_coverage * 100)}%` : ""}</p>}
             {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty || reviewDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || reviewDirty || action === "recognize" || project.status === "recognizing" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
               {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
               {project.video_frames.length ? (capabilities.tab_ocr ? "识别视频六线 TAB" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}

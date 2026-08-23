@@ -21,7 +21,12 @@ export type RecognitionSummary = {
   end_measure?: number;
   estimated_tempo_bpm?: number;
   confidence?: number;
+  glyph_coverage?: number;
+  recognized_glyphs?: number;
+  total_glyphs?: number;
   low_confidence_glyphs?: number;
+  layout_counts?: Record<string, number>;
+  polarity_counts?: Record<string, number>;
   warnings?: string[];
 };
 
@@ -109,6 +114,8 @@ export type RecognitionFrame = {
   start_measure_confidence: number;
   highlighted_index: number | null;
   raw_measure_labels: Array<string | null>;
+  layout?: "tab_only" | "staff_tab_pair";
+  polarity?: "dark_on_light" | "light_on_dark";
 };
 
 export type RecognitionDiagnostics = {

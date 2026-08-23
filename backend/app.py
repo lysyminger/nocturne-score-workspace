@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -25,7 +26,7 @@ from backend.database import Database
 from backend.score_pdf import build_slice_preview_pdf
 from backend.security import hash_password, hash_session_token, new_session_token, verify_password
 from backend.tab_recognition import FrameInput as TabFrameInput
-from backend.tab_recognition import recognize_tab_frames, update_recognized_measure
+from backend.tab_recognition import recognize_tab_frames, recognize_tab_measure, update_recognized_measure
 from backend.video_analysis import (
     MAX_ANALYSIS_FRAMES,
     MAX_ANALYSIS_SECONDS,
@@ -115,8 +116,8 @@ class TabNoteEdit(BaseModel):
 
 
 class TabEventEdit(BaseModel):
-    onset_eighths: int = Field(ge=0, le=7)
-    duration_eighths: int = Field(ge=1, le=8)
+    onset_eighths: float = Field(ge=0, lt=8, multiple_of=0.5)
+    duration_eighths: float = Field(ge=0.5, le=8, multiple_of=0.5)
     notes: list[TabNoteEdit] = Field(min_length=1, max_length=6)
 
 
@@ -1257,6 +1258,82 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         project = owned_project(project_id, user["id"])
         _, _, diagnostics = tab_diagnostics_for_project(project)
         return diagnostics
+
+    @api.post("/api/projects/{project_id}/recognition/measures/{measure_number}/retry")
+    def retry_recognized_measure(
+        project_id: str,
+        measure_number: int,
+        user: dict = Depends(current_user),
+    ) -> dict:
+        project = owned_project(project_id, user["id"])
+        if project["status"] in {"downloading", "analyzing", "recognizing"}:
+            raise HTTPException(status_code=409, detail="当前项目正在处理，请稍后再试")
+        capabilities = capability_status()
+        if not capabilities["tab_ocr"]:
+            raise HTTPException(status_code=503, detail="重新识别需要 OpenCV 和 Tesseract OCR")
+        score_path, _, diagnostics = tab_diagnostics_for_project(project)
+        frame_candidates = []
+        for frame in diagnostics.get("frames") or []:
+            start = frame.get("start_measure")
+            count = max(1, len(frame.get("raw_measure_labels") or []))
+            if isinstance(start, int) and start <= measure_number < start + count:
+                frame_candidates.append(frame)
+        if not frame_candidates:
+            raise HTTPException(status_code=409, detail="识别记录中没有覆盖这个小节的源帧")
+        current_measure = next(
+            (row for row in diagnostics.get("measures") or [] if int(row.get("number") or 0) == measure_number),
+            None,
+        )
+        target_time = float((current_measure or {}).get("source_time") or frame_candidates[0].get("time_seconds") or 0)
+        frame_info = min(
+            frame_candidates,
+            key=lambda row: (
+                abs(float(row.get("time_seconds") or 0) - target_time),
+                -float(row.get("start_measure_confidence") or 0),
+            ),
+        )
+        with db.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT stored_path, metadata, sort_order FROM assets
+                WHERE project_id = ? AND kind = 'video_frame'
+                ORDER BY sort_order, created_at
+                """,
+                (project_id,),
+            ).fetchall()
+        available = []
+        for row in rows:
+            path = Path(row["stored_path"])
+            if not path.is_file():
+                continue
+            metadata = json_object(row["metadata"]) or {}
+            available.append((row, path, metadata))
+        if not available:
+            raise HTTPException(status_code=404, detail="原始视频切片已经不存在，请重新切片")
+        matching = [item for item in available if item[1].name == frame_info.get("name")]
+        if matching:
+            frame_row, frame_path, metadata = matching[0]
+        else:
+            frame_row, frame_path, metadata = min(
+                available,
+                key=lambda item: abs(float(item[2].get("time_seconds") or 0) - float(frame_info.get("time_seconds") or 0)),
+            )
+        frame = TabFrameInput(
+            path=frame_path,
+            time_seconds=float(metadata.get("time_seconds") or frame_info.get("time_seconds") or 0),
+            source_frame=int(metadata.get("source_frame") or frame_row["sort_order"]),
+        )
+        try:
+            with tempfile.TemporaryDirectory(prefix="measure-retry-", dir=score_path.parent) as work_dir:
+                return recognize_tab_measure(
+                    frame,
+                    Path(work_dir),
+                    frame_start_measure=int(frame_info["start_measure"]),
+                    measure_number=measure_number,
+                    tesseract_path=capabilities["tesseract_path"],
+                )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"第 {measure_number} 小节重新识别失败：{str(exc)[:240]}") from exc
 
     @api.patch("/api/projects/{project_id}/recognition/measures/{measure_number}")
     def edit_recognized_measure(

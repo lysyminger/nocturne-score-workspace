@@ -192,9 +192,14 @@ alphaTab 负责解析、排版、光标和播放事件；`js-synthesizer` 封装
 | `Ctrl/Cmd + 单击` | 添加或移除任意离散音符 |
 | `Shift + 单击` | 在同一谱表、同一声部内从锚点连续选择 |
 | 拖过音符 | 扩展连续选区 |
+| 顶部“每行 3 / 4 小节” | 固定谱面每一行的小节数，并记住本机选择 |
+| 顶部 `1/1–1/16` | 把所选节拍直接改成指定时值 |
+| `+` / `=`、`-` / `_` | 缩短、延长所选节拍，方向与 Guitar Pro 8 一致 |
+| `←/→`、`↑/↓` | 在相邻节拍或当前和弦的音之间移动选择 |
+| `Shift + 方向键` | 扩展连续选择范围 |
 | `0–9` | 给全部所选六线谱音符输入品位，支持两位数 |
 | `Alt + ↑/↓` | 在相邻弦保持音高换把位；自然泛音会安全跳过 |
-| `B/V/N/M/R/X` | 推弦、颤音、泛音、闷音、延音、死音 |
+| `B/V/N/M/I/X` | 推弦、颤音、泛音、闷音、延音、死音 |
 | `L/S/H/P` | 对同一弦上的两个音应用连音、滑音、击弦、勾弦 |
 | `Delete` | 删除所选音符 |
 | `Ctrl/Cmd + E` | 打开选区命令面板 |
@@ -206,6 +211,8 @@ alphaTab 负责解析、排版、光标和播放事件；`js-synthesizer` 封装
 
 技巧键采用本项目容易记忆的分拆映射，并非逐键复制 Guitar Pro 8。识别草稿当前每个音符只能保存一个 `technique`，所以对同一音符连续应用多个效果时以后一次为准；导入的结构化谱不受这个单字段限制。统一菜单中的 PDF 是原视频谱图裁切合成版，数值校正会更新可播放谱，但不会改写已经生成的像素 PDF。
 
+识别结果还提供逐小节的十六分网格：鼠标拖动可选择连续时值，弦按钮可指定输入弦，数字键可直接打品位，`R` 把选区改为休止，`Alt + ←/→` 移动事件，`Alt + ↑/↓` 换弦。点击“重试本小节识别”只生成未保存提案，不会直接覆盖已经校正的版本。
+
 交互参考：[Guitar Pro 8 用户手册](https://support.guitar-pro.com/hc/en-us/articles/5018404823069-GP8-Guitar-Pro-8-User-Guide)、[Guitar Pro 8 快捷键](https://support.guitar-pro.com/hc/en-us/articles/360001646978-GP8-List-of-keyboard-shortcuts)、[Guitar Pro 命令面板](https://www.guitar-pro.com/blog/p/54190-unlock-guitar-pro-tips-you-should-know)、[Guitar Pro 8 Audio Track](https://support.guitar-pro.com/hc/en-us/articles/7460696563357-GP8-How-to-use-the-Audio-Track)、[alphaTab 音符事件](https://alphatab.net/docs/reference/api/notemousedown)、[alphaTab 音视频同步](https://alphatab.net/docs/guides/audio-video-sync)。
 
 ## 乐谱识别边界
@@ -215,7 +222,8 @@ alphaTab 负责解析、排版、光标和播放事件；`js-synthesizer` 封装
 - 谱面区域基本固定；
 - 画面存在六根清晰水平谱线；
 - 品位数字清晰，透视、旋转和遮挡较少；
-- 默认标准六弦调弦、4/4 拍和八分音符网格；
+- 默认标准六弦调弦和 4/4 拍；自动节奏会尝试区分单梁八分与双梁十六分，校对器统一使用十六分网格；
+- 休止符主要根据相邻事件之间的空隙推导，复杂连休止、三连音和被遮挡的符干仍需要人工校正；
 - 重复小节可用于投票纠错，而不是直接全部删除。
 
 识别结果会保存置信度、缺失小节、来源帧和解析警告。系统不会把低置信度结果包装成确定的成品谱。

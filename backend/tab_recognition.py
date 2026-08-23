@@ -57,7 +57,7 @@ class NoteToken:
     x: float
     string: int
     glyphs: list[DigitGlyph]
-    duration_units: int | None = None
+    duration_units: float | None = None
     raw_text: str | None = None
     raw_confidence: float = 0.0
 
@@ -101,8 +101,9 @@ class TabNote:
 
 @dataclass(frozen=True)
 class TabEvent:
-    onset: int
-    duration: int
+    # Values are measured in eighth-note units. Half a unit is a sixteenth note.
+    onset: float
+    duration: float
     notes: tuple[TabNote, ...]
 
 
@@ -112,7 +113,7 @@ class MeasureCandidate:
     events: tuple[TabEvent, ...]
     quality: float
     source_time: float
-    signature: tuple[tuple[int, int, int], ...]
+    signature: tuple[tuple[float, int, int], ...]
     source_path: Path | None = None
     crop_box: tuple[int, int, int, int] | None = None
 
@@ -276,7 +277,8 @@ def assign_rhythm_units(
     """Read the compact rhythm stems rendered below this video's TAB staff.
 
     A standalone stem is a quarter note, a nearby augmentation dot makes it a
-    dotted quarter, and two stems joined by a lower beam are eighth notes.
+    dotted quarter, one connecting beam is an eighth note, and two separated
+    beam bands are a sixteenth note.
     """
     spacing = float(statistics.median(np.diff(staff_lines)))
     top = min(gray.shape[0], round(staff_lines[-1] + spacing * 0.2))
@@ -311,7 +313,12 @@ def assign_rhythm_units(
             continue
         x, y, width, height, _area = stem_component
         if width >= spacing * 1.2:
-            token.duration_units = 1
+            component_pixels = rhythm[y : y + height, x : x + width]
+            beam_rows = np.flatnonzero(
+                np.count_nonzero(component_pixels, axis=1) >= spacing * 1.2
+            )
+            beam_bands = _group_runs(beam_rows)
+            token.duration_units = 0.5 if len(beam_bands) >= 2 else 1
             continue
         stem_right = x + width
         stem_bottom = y + height
@@ -746,12 +753,12 @@ def _candidate_from_geometry(
         confidences.append(token.confidence)
 
     events: list[TabEvent] = []
-    signature_items: list[tuple[int, int, int]] = []
-    cursor = 0
+    signature_items: list[tuple[float, int, int]] = []
+    cursor = 0.0
     for group in token_groups:
         durations = [token.duration_units for token, _note in group if token.duration_units]
         if durations:
-            duration = max(1, round(statistics.median(durations)))
+            duration = max(0.5, round(statistics.median(durations) * 2) / 2)
         elif len(token_groups) >= 6:
             duration = 1
         else:
@@ -855,9 +862,11 @@ def _pitch_xml(parent: ET.Element, midi: int) -> None:
     ET.SubElement(pitch, "octave").text = str(midi // 12 - 1)
 
 
-def _duration_notation(duration: int) -> tuple[str, bool]:
+def _duration_notation(duration: float) -> tuple[str, bool]:
     mapping = {
+        0.5: ("16th", False),
         1: ("eighth", False),
+        1.5: ("eighth", True),
         2: ("quarter", False),
         3: ("quarter", True),
         4: ("half", False),
@@ -867,13 +876,17 @@ def _duration_notation(duration: int) -> tuple[str, bool]:
     return mapping.get(duration, ("eighth", False))
 
 
-def _append_rest(measure_xml: ET.Element, duration: int) -> None:
+def _musicxml_duration(duration: float) -> str:
+    return str(round(duration * 2))
+
+
+def _append_rest(measure_xml: ET.Element, duration: float) -> None:
     remaining = duration
-    for chunk in (8, 6, 4, 3, 2, 1):
-        while remaining >= chunk:
+    for chunk in (8, 6, 4, 3, 2, 1.5, 1, 0.5):
+        while remaining + 1e-9 >= chunk:
             note = ET.SubElement(measure_xml, "note")
             ET.SubElement(note, "rest")
-            ET.SubElement(note, "duration").text = str(chunk)
+            ET.SubElement(note, "duration").text = _musicxml_duration(chunk)
             note_type, dotted = _duration_notation(chunk)
             ET.SubElement(note, "type").text = note_type
             if dotted:
@@ -945,7 +958,8 @@ def _build_musicxml(
         measure_xml = ET.SubElement(part, "measure", number=str(number))
         if number == start_number:
             attributes = ET.SubElement(measure_xml, "attributes")
-            ET.SubElement(attributes, "divisions").text = "2"
+            # Four divisions per quarter note preserve sixteenth-note edits.
+            ET.SubElement(attributes, "divisions").text = "4"
             key = ET.SubElement(attributes, "key")
             ET.SubElement(key, "fifths").text = "0"
             time = ET.SubElement(attributes, "time")
@@ -985,7 +999,7 @@ def _build_musicxml(
                     ET.SubElement(note, "chord")
                 midi = STANDARD_TUNING_MIDI[tab_note.string - 1] + tab_note.fret
                 _pitch_xml(note, midi)
-                ET.SubElement(note, "duration").text = str(event.duration)
+                ET.SubElement(note, "duration").text = _musicxml_duration(event.duration)
                 ET.SubElement(note, "voice").text = "1"
                 note_type, dotted = _duration_notation(event.duration)
                 ET.SubElement(note, "type").text = note_type
@@ -1135,7 +1149,7 @@ def recognize_tab_frames(
     confidence = statistics.mean(glyph_confidences) if glyph_confidences else 0.0
     low_confidence = sum(value < 60 for value in glyph_confidences)
     warnings = [
-        "当前按六弦标准调弦、4/4 拍和 1/8 拍网格生成草稿",
+        "当前按六弦标准调弦和 4/4 拍生成草稿；校对器支持细化到十六分音符网格",
         "技巧符号不会从视频中自动猜测，可在校对器中手动添加",
     ]
     if pdf_error:
@@ -1197,6 +1211,42 @@ def recognize_tab_frames(
     return TabRecognitionResult(score_path, diagnostics_path, summary, suggestions, recognized_pdf_path)
 
 
+def recognize_tab_measure(
+    frame: FrameInput,
+    output_dir: Path,
+    *,
+    frame_start_measure: int,
+    measure_number: int,
+    tesseract_path: str = "tesseract",
+) -> dict:
+    """Re-run OCR for one measure and return an unsaved review proposal."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    parsed = parse_frame(frame)
+    target_index = measure_number - frame_start_measure
+    if target_index < 0 or target_index >= len(parsed.measures):
+        raise ValueError("所选切片不包含这个小节，请重新选择更接近的源帧")
+    _run_frame_ocr(parsed, output_dir / ".ocr", tesseract_path)
+    parsed.start_measure = frame_start_measure
+    parsed.start_measure_confidence = 100.0
+    _cluster_and_label_glyphs([parsed])
+    candidate = _candidate_from_geometry(parsed, target_index, measure_number)
+    return {
+        "number": measure_number,
+        "quality": round(candidate.quality, 2),
+        "source_time": round(candidate.source_time, 3),
+        "events": [
+            {
+                "onset_eighths": event.onset,
+                "duration_eighths": event.duration,
+                "notes": [_tab_note_to_dict(note) for note in event.notes],
+            }
+            for event in candidate.events
+        ],
+        "source_frame": frame.source_frame,
+        "source_name": frame.path.name,
+    }
+
+
 def update_recognized_measure(
     score_path: Path,
     diagnostics_path: Path,
@@ -1212,11 +1262,24 @@ def update_recognized_measure(
     if not start_measure <= measure_number <= end_measure:
         raise ValueError(f"小节号必须在 {start_measure}～{end_measure} 之间")
 
+    def half_eighth(value: object, label: str) -> float:
+        number = float(value)
+        if not math.isfinite(number) or abs(number * 2 - round(number * 2)) > 1e-9:
+            raise ValueError(f"{label}必须落在十六分音符网格上")
+        return round(number * 2) / 2
+
     normalized_events: list[TabEvent] = []
-    previous_end = 0
-    for raw_event in sorted(events, key=lambda item: (int(item["onset_eighths"]), int(item["duration_eighths"]))):
-        onset = int(raw_event["onset_eighths"])
-        duration = int(raw_event["duration_eighths"])
+    previous_end = 0.0
+    for raw_event in sorted(
+        events,
+        key=lambda item: (float(item["onset_eighths"]), float(item["duration_eighths"])),
+    ):
+        onset = half_eighth(raw_event["onset_eighths"], "音符起点")
+        duration = half_eighth(raw_event["duration_eighths"], "音符时值")
+        if onset < 0 or onset >= EIGHTH_UNITS_PER_MEASURE:
+            raise ValueError("音符起点超出当前 4/4 小节范围")
+        if duration < 0.5 or duration > EIGHTH_UNITS_PER_MEASURE:
+            raise ValueError("音符时值必须在十六分音符到全音符之间")
         if onset < previous_end:
             raise ValueError("音符事件不能互相重叠；同一时刻的音请放在同一个和弦事件中")
         if onset + duration > EIGHTH_UNITS_PER_MEASURE:
@@ -1260,8 +1323,8 @@ def update_recognized_measure(
         number = int(row["number"])
         row_events = tuple(
             TabEvent(
-                int(event["onset_eighths"]),
-                int(event["duration_eighths"]),
+                float(event["onset_eighths"]),
+                float(event["duration_eighths"]),
                 tuple(_tab_note_from_dict(note) for note in event["notes"]),
             )
             for event in row.get("events", [])

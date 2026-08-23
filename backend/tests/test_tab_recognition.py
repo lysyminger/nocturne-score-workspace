@@ -62,6 +62,24 @@ def test_reads_beamed_quarter_and_dotted_quarter_rhythm():
     assert [token.duration_units for token in tokens] == [1, 1, 2, 3]
 
 
+def test_reads_double_beam_as_sixteenth_notes():
+    image = np.full((240, 180), 255, dtype=np.uint8)
+    staff_lines = [40, 58, 76, 94, 112, 130]
+    for y in staff_lines:
+        cv2.line(image, (0, y), (179, y), 228, 1)
+
+    cv2.line(image, (50, 135), (50, 175), 0, 2)
+    cv2.line(image, (90, 135), (90, 175), 0, 2)
+    cv2.line(image, (50, 168), (90, 168), 0, 3)
+    cv2.line(image, (50, 175), (90, 175), 0, 3)
+
+    glyph = DigitGlyph(np.ones((14, 8), dtype=np.uint8), np.zeros((28, 20), dtype=np.uint8))
+    tokens = [NoteToken(x=x, string=3, glyphs=[glyph]) for x in (50, 90)]
+    assign_rhythm_units(image, staff_lines, tokens)
+
+    assert [token.duration_units for token in tokens] == [0.5, 0.5]
+
+
 def _frame(time_seconds: float, labels: list[str | None]) -> ParsedFrame:
     measures = [
         MeasureGeometry(0, 100, None, raw_label=label, raw_label_confidence=90)
@@ -129,7 +147,29 @@ def test_musicxml_splits_nonstandard_rest_lengths(tmp_path):
 
     root = ET.parse(output).getroot()
     rest_durations = [int(note.findtext("duration")) for note in root.findall(".//note") if note.find("rest") is not None]
-    assert rest_durations == [4, 1, 2]
+    assert rest_durations == [8, 2, 4]
+
+
+def test_musicxml_preserves_sixteenth_note_and_rest(tmp_path):
+    candidate = MeasureCandidate(
+        number=1,
+        events=(TabEvent(0.5, 0.5, (TabNote(1, 7),)),),
+        quality=100,
+        source_time=0,
+        signature=((0.5, 1, 7),),
+    )
+    output = tmp_path / "sixteenth.musicxml"
+
+    _build_musicxml("十六分音符测试", {1: candidate}, output, 120)
+
+    root = ET.parse(output).getroot()
+    assert root.findtext(".//divisions") == "4"
+    played_note = next(note for note in root.findall(".//note") if note.find("pitch") is not None)
+    assert played_note.findtext("duration") == "1"
+    assert played_note.findtext("type") == "16th"
+    first_rest = next(note for note in root.findall(".//note") if note.find("rest") is not None)
+    assert first_rest.findtext("duration") == "1"
+    assert first_rest.findtext("type") == "16th"
 
 
 def test_musicxml_writes_guitar_techniques_and_link_endpoints(tmp_path):

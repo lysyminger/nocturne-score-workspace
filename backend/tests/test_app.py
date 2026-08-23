@@ -272,7 +272,14 @@ def test_recognition_prefers_video_tab_frames(client: TestClient, monkeypatch, t
             """{
               "summary": {"engine": "tab_cv_tesseract", "start_measure": 1, "end_measure": 8, "estimated_tempo_bpm": 120},
               "sync_suggestions": [],
-              "frames": [],
+              "frames": [{
+                "name": "frame.jpg",
+                "time_seconds": 1.5,
+                "source_frame": 45,
+                "start_measure": 1,
+                "start_measure_confidence": 96,
+                "raw_measure_labels": ["1", "2", "3", "4"]
+              }],
               "measures": [{
                 "number": 1,
                 "quality": 90,
@@ -310,8 +317,8 @@ def test_recognition_prefers_video_tab_frames(client: TestClient, monkeypatch, t
         json={
             "events": [
                 {
-                    "onset_eighths": 0,
-                    "duration_eighths": 2,
+                    "onset_eighths": 0.5,
+                    "duration_eighths": 0.5,
                     "notes": [{"string": 2, "fret": 7, "technique": "slide"}],
                 }
             ]
@@ -321,6 +328,37 @@ def test_recognition_prefers_video_tab_frames(client: TestClient, monkeypatch, t
     assert edited.json()["measures"][0]["events"][0]["notes"] == [
         {"string": 2, "fret": 7, "technique": "slide"}
     ]
+    assert edited.json()["measures"][0]["events"][0]["duration_eighths"] == 0.5
+
+    def fake_retry_measure(frame, _output_dir, **kwargs):
+        assert frame.path == frame_path
+        assert frame.source_frame == 45
+        assert kwargs["frame_start_measure"] == 1
+        assert kwargs["measure_number"] == 1
+        return {
+            "number": 1,
+            "quality": 82,
+            "source_time": 1.5,
+            "events": [
+                {
+                    "onset_eighths": 0,
+                    "duration_eighths": 1,
+                    "notes": [{"string": 1, "fret": 5}],
+                }
+            ],
+            "source_frame": 45,
+            "source_name": "frame.jpg",
+        }
+
+    monkeypatch.setattr("backend.app.recognize_tab_measure", fake_retry_measure)
+    retried = client.post(f"/api/projects/{project['id']}/recognition/measures/1/retry")
+    assert retried.status_code == 200
+    assert retried.json()["events"][0]["notes"] == [{"string": 1, "fret": 5}]
+
+    # A retry is only a proposal: the manually saved measure remains unchanged
+    # until the user explicitly saves the replacement in the review panel.
+    persisted = client.get(f"/api/projects/{project['id']}/recognition").json()
+    assert persisted["measures"][0]["events"][0]["duration_eighths"] == 0.5
 
 
 def test_audio_analysis_uses_video_and_applies_non_destructive_alignment(client: TestClient, monkeypatch, tmp_path):

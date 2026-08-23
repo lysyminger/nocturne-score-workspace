@@ -37,7 +37,7 @@ import {
 import { api } from "./api";
 import { ScoreReviewPanel } from "./components/ScoreReviewPanel";
 import { VideoSliceEditor } from "./components/VideoSliceEditor";
-import type { Capabilities, Project, RecognitionDiagnostics, RecognitionEvent, SyncPoint, User, VideoAnalysisRequest } from "./types";
+import type { Capabilities, Project, RecognitionDiagnostics, RecognitionEvent, RecognitionMeasure, SyncPoint, User, VideoAnalysisRequest } from "./types";
 
 const AlphaTabPlayer = lazy(() =>
   import("./components/AlphaTabPlayer").then((module) => ({ default: module.AlphaTabPlayer }))
@@ -632,6 +632,21 @@ function ProjectWorkspace({
     }
   }
 
+  async function retryReviewedMeasure(measureNumber: number): Promise<RecognitionMeasure> {
+    if (!project) throw new Error("项目尚未载入");
+    setAction("review-recognize");
+    try {
+      const proposal = await api.retryRecognitionMeasure(project.id, measureNumber);
+      showNotice({ message: `第 ${measureNumber} 小节已重新识别为草稿，请对照确认后保存`, tone: "success" });
+      return proposal;
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "小节重新识别失败", tone: "error" });
+      throw error;
+    } finally {
+      setAction(null);
+    }
+  }
+
   async function saveRecognitionChanges(changes: Array<{ measure: number; events: RecognitionEvent[] }>) {
     if (!project || !changes.length) return;
     setAction("review-save");
@@ -862,7 +877,7 @@ function ProjectWorkspace({
                     videoFrames={project.video_frames}
                     recognition={recognition}
                     reviewOpen={reviewOpen}
-                    editingDisabled={reviewOpen || action === "recognize" || project.status === "recognizing"}
+                    editingDisabled={reviewOpen || action === "recognize" || action === "review-recognize" || project.status === "recognizing"}
                     onToggleReview={() => {
                       if (scoreDirty && !reviewOpen) showNotice({ message: "请先保存谱面修改，再打开精确网格校对", tone: "error" });
                       else if (reviewOpen) closeReview();
@@ -885,10 +900,12 @@ function ProjectWorkspace({
                       project={project}
                       diagnostics={recognition}
                       measureNumber={reviewMeasure}
-                      busy={action === "review-save"}
+                      busy={action === "review-save" || action === "review-recognize"}
+                      retrying={action === "review-recognize"}
                       onMeasureChange={setReviewMeasure}
                       onDirtyChange={setReviewDirty}
                       onSave={saveReviewedMeasure}
+                      onRetryRecognition={retryReviewedMeasure}
                     />
                   </aside>
                 )}
@@ -914,7 +931,7 @@ function ProjectWorkspace({
               </label>
             )}
           </div>
-          {((action && action !== "rename" && action !== "rights") || ["downloading", "analyzing", "recognizing"].includes(project.status) || project.audio_analysis?.status === "pending") && <div className="stage-progress"><LoaderCircle size={15} className="spin" /> {project.status_message || "正在处理，请不要关闭页面"}</div>}
+          {((action && action !== "rename" && action !== "rights") || ["downloading", "analyzing", "recognizing"].includes(project.status) || project.audio_analysis?.status === "pending") && <div className="stage-progress"><LoaderCircle size={15} className="spin" /> {action === "review-recognize" ? `正在重新识别第 ${reviewMeasure} 小节…` : project.status_message || "正在处理，请不要关闭页面"}</div>}
         </section>
 
         <aside className="inspector">

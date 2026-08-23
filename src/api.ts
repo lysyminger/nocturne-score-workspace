@@ -3,6 +3,7 @@ import type {
   Project,
   RecognitionDiagnostics,
   RecognitionEvent,
+  RecognitionMeasure,
   SyncPoint,
   User,
   VideoAnalysisRequest
@@ -65,6 +66,11 @@ export const api = {
   recognizeProject: (id: string) =>
     request<{ status: string; message: string; engine: "tablature" | "staff" }>(`/api/projects/${id}/recognize`, { method: "POST" }),
   recognition: (id: string) => request<RecognitionDiagnostics>(`/api/projects/${id}/recognition`),
+  retryRecognitionMeasure: (id: string, measure: number) =>
+    request<RecognitionMeasure & { source_frame: number; source_name: string }>(
+      `/api/projects/${id}/recognition/measures/${measure}/retry`,
+      { method: "POST" }
+    ),
   updateRecognitionMeasure: (id: string, measure: number, events: RecognitionEvent[]) =>
     request<RecognitionDiagnostics>(`/api/projects/${id}/recognition/measures/${measure}`, {
       method: "PATCH",

@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import math
+import re
 import statistics
 import subprocess
 import xml.etree.ElementTree as ET
@@ -81,6 +82,15 @@ class MeasureGeometry:
     label_alternates: list[np.ndarray] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class TechniqueMark:
+    x: float
+    technique: str
+    raw_text: str
+    confidence: float
+    end_x: float | None = None
+
+
 @dataclass
 class ParsedFrame:
     source: FrameInput
@@ -94,6 +104,7 @@ class ParsedFrame:
     layout: str = "tab_only"
     polarity: str = "dark_on_light"
     notation_staff_lines: list[int] | None = None
+    technique_marks: list[TechniqueMark] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -221,9 +232,16 @@ def detect_score_layout(gray: np.ndarray) -> ScoreLayout:
     if not choices:
         raise ValueError("没有检测到完整的六线 TAB，请重新框选六根弦线")
 
+    background_level = float(np.median(gray))
+    preferred_polarity = "dark_on_light" if background_level >= 160 else "light_on_dark" if background_level <= 96 else None
+    preferred = [item for item in choices if item[1] == preferred_polarity]
     _score, polarity, staff_lines, signal, foreground, centers = max(
-        choices, key=lambda item: item[0]
+        preferred or choices, key=lambda item: item[0]
     )
+    if preferred_polarity and polarity != preferred_polarity:
+        polarity = preferred_polarity
+        signal, foreground = _local_foreground(gray, polarity)
+        centers, _strength = _line_centers(signal, foreground)
     spacing = float(statistics.median(np.diff(staff_lines)))
     notation_candidates = [value for value in centers if value < staff_lines[0] - spacing * 1.5]
     notation_group = _best_line_group(notation_candidates, np.mean(np.minimum(signal, 48), axis=1) + np.mean(foreground, axis=1) * 12, 5, height)
@@ -269,7 +287,27 @@ def detect_measure_boundaries(gray: np.ndarray, staff_lines: list[int]) -> list[
     top, bottom = staff_lines[0], staff_lines[-1]
     band = gray[top : bottom + 1] < 215
     column_counts = np.count_nonzero(band, axis=0)
-    groups = _group_runs(np.flatnonzero(column_counts >= band.shape[0] * 0.72))
+    longest_runs = np.zeros(band.shape[1], dtype=np.int32)
+    for x in range(band.shape[1]):
+        runs = _group_runs(np.flatnonzero(band[:, x]))
+        longest_runs[x] = max((len(run) for run in runs), default=0)
+    below_end = min(gray.shape[0], round(bottom + spacing * 2.2) + 1)
+    below = gray[bottom + 1 : below_end] < 215
+    below_counts = np.count_nonzero(below, axis=0) if below.size else np.zeros(gray.shape[1])
+    # A note stem can cross most or all TAB lines, but it continues well below
+    # the sixth line. A barline stops at the staff edge. This distinction is
+    # essential for dense printed PDF tablature where every note has a stem.
+    candidates = (column_counts >= band.shape[0] * 0.86) & (
+        longest_runs >= band.shape[0] * 0.9
+    ) & (
+        below_counts <= max(2, spacing * 0.35)
+    )
+    groups = _group_runs(np.flatnonzero(candidates))
+    if len(groups) < 3:
+        relaxed = (column_counts >= band.shape[0] * 0.86) & (
+            below_counts <= max(2, spacing * 0.35)
+        )
+        groups = _group_runs(np.flatnonzero(relaxed))
     centers = [round(statistics.mean(group)) for group in groups]
     centers = _merge_nearby(centers, max(5, spacing * 0.75))
     if len(centers) < 3:
@@ -283,7 +321,7 @@ def detect_measure_boundaries(gray: np.ndarray, staff_lines: list[int]) -> list[
     filtered = [centers[0]]
     for center in centers[1:]:
         gap = center - filtered[-1]
-        if gap < expected * 0.45:
+        if gap < expected * 0.3:
             filtered[-1] = statistics.mean((filtered[-1], center))
         else:
             filtered.append(center)
@@ -762,6 +800,85 @@ def _run_frame_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> N
         measure.raw_label_confidence = readings[text]
 
 
+def _technique_from_text(text: str) -> str | None:
+    normalized = re.sub(r"[^A-Z]", "", text.upper())
+    if not normalized:
+        return None
+    if "PM" in normalized:
+        return "palm_mute"
+    if any(value in normalized for value in ("NH", "AH", "PH", "HARM")):
+        return "harmonic"
+    if "FULL" in normalized or "BEND" in normalized:
+        return "bend"
+    if normalized in {"SL", "SLIDE"}:
+        return "slide"
+    if normalized in {"LR", "LETRING"}:
+        return "let_ring"
+    if normalized == "H":
+        return "hammer_on"
+    if normalized == "P":
+        return "pull_off"
+    return None
+
+
+def _run_technique_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> None:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    image_path = work_dir / f"technique-{frame.source.source_frame or frame.source.path.stem}.png"
+    cv2.imwrite(str(image_path), frame.gray)
+    try:
+        result = subprocess.run(
+            [
+                tesseract_path,
+                str(image_path),
+                "stdout",
+                "--psm",
+                "11",
+                "-l",
+                "eng",
+                "-c",
+                "user_defined_dpi=300",
+                "tsv",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    finally:
+        image_path.unlink(missing_ok=True)
+    if result.returncode != 0:
+        return
+
+    spacing = float(statistics.median(np.diff(frame.staff_lines)))
+    marks: list[TechniqueMark] = []
+    reader = csv.DictReader(io.StringIO(result.stdout), delimiter="\t")
+    for row in reader:
+        raw_text = (row.get("text") or "").strip()
+        technique = _technique_from_text(raw_text)
+        if not technique:
+            continue
+        try:
+            confidence = max(0.0, float(row.get("conf") or 0))
+            left = float(row.get("left") or 0)
+            top = float(row.get("top") or 0)
+            width = float(row.get("width") or 0)
+            height = float(row.get("height") or 0)
+        except (TypeError, ValueError):
+            continue
+        if confidence < 20 or top + height > frame.staff_lines[0] + spacing * 0.8:
+            continue
+        marks.append(
+            TechniqueMark(
+                x=left + width / 2,
+                end_x=left + max(width, spacing * 2) if technique == "palm_mute" else None,
+                technique=technique,
+                raw_text=raw_text,
+                confidence=confidence,
+            )
+        )
+    frame.technique_marks = marks
+
+
 @dataclass
 class _GlyphCluster:
     members: list[DigitGlyph]
@@ -957,10 +1074,26 @@ def _candidate_from_geometry(
             token_groups.append([(token, note)])
         confidences.append(token.confidence)
 
+    group_centers = [statistics.mean(token.x for token, _note in group) for group in token_groups]
+    group_techniques: dict[int, str] = {}
+    for mark in frame.technique_marks:
+        if not (geometry.left - spacing * 2 <= mark.x < geometry.right):
+            continue
+        if mark.technique == "palm_mute":
+            start_x = max(geometry.left, mark.x - spacing * 2)
+            end_x = max(mark.end_x or start_x, start_x + spacing * 4)
+            for group_index, center in enumerate(group_centers):
+                if start_x <= center <= end_x:
+                    group_techniques[group_index] = mark.technique
+            continue
+        before = [group_index for group_index, center in enumerate(group_centers) if center <= mark.x + spacing]
+        if before:
+            group_techniques[before[-1]] = mark.technique
+
     events: list[TabEvent] = []
     signature_items: list[tuple[float, int, int]] = []
     cursor = 0.0
-    for group in token_groups:
+    for group_index, group in enumerate(token_groups):
         durations = [token.duration_units for token, _note in group if token.duration_units]
         if durations:
             duration = max(0.5, round(statistics.median(durations) * 2) / 2)
@@ -971,7 +1104,13 @@ def _candidate_from_geometry(
         if cursor >= EIGHTH_UNITS_PER_MEASURE:
             break
         duration = min(duration, EIGHTH_UNITS_PER_MEASURE - cursor)
-        notes = tuple(sorted({note for _token, note in group}, key=lambda note: note.string))
+        technique = group_techniques.get(group_index)
+        notes = tuple(
+            sorted(
+                {TabNote(note.string, note.fret, technique) for _token, note in group},
+                key=lambda note: note.string,
+            )
+        )
         events.append(TabEvent(onset=cursor, duration=duration, notes=notes))
         signature_items.extend((cursor, note.string, note.fret) for note in notes)
         cursor += duration
@@ -1430,6 +1569,7 @@ def recognize_tab_frames(
         try:
             frame = parse_frame(source)
             _run_frame_ocr(frame, output_dir / ".ocr", tesseract_path)
+            _run_technique_ocr(frame, output_dir / ".ocr", tesseract_path)
             _infer_frame_start(frame)
             parsed.append(frame)
         except Exception as exc:
@@ -1474,9 +1614,13 @@ def recognize_tab_frames(
     mean_glyph_confidence = statistics.mean(glyph_confidences) if glyph_confidences else 0.0
     confidence = mean_glyph_confidence / 100 * glyph_coverage
     low_confidence = sum(value < 60 for value in glyph_confidences)
+    technique_counts: dict[str, int] = defaultdict(int)
+    for frame in parsed:
+        for mark in frame.technique_marks:
+            technique_counts[mark.technique] += 1
     warnings = [
         "当前按六弦标准调弦和 4/4 拍生成草稿；校对器支持细化到十六分音符网格",
-        "技巧符号不会从视频中自动猜测，可在校对器中手动添加",
+        "已尝试识别 H/P、sl.、P.M.、Full/Bend 与泛音文字；复杂曲线、揉弦和连音仍需在校对器中确认",
     ]
     layout_counts = {
         name: sum(frame.layout == name for frame in parsed)
@@ -1515,6 +1659,7 @@ def recognize_tab_frames(
         "recognized_glyphs": recognized_glyphs,
         "total_glyphs": total_glyphs,
         "low_confidence_glyphs": low_confidence,
+        "technique_counts": dict(sorted(technique_counts.items())),
         "parsed_frames": len(parsed),
         "failed_frames": len(parse_errors),
         "unresolved_frames": len(unresolved),
@@ -1589,6 +1734,7 @@ def recognize_tab_measure(
     if target_index < 0 or target_index >= len(parsed.measures):
         raise ValueError("所选切片不包含这个小节，请重新选择更接近的源帧")
     _run_frame_ocr(parsed, output_dir / ".ocr", tesseract_path)
+    _run_technique_ocr(parsed, output_dir / ".ocr", tesseract_path)
     parsed.start_measure = frame_start_measure
     parsed.start_measure_confidence = 100.0
     _cluster_and_label_glyphs([parsed])

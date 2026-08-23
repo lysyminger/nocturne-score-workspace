@@ -85,6 +85,11 @@ export const api = {
     Array.from(files).forEach((file) => body.append("files", file));
     return request<Project>(`/api/projects/${id}/score-images`, { method: "POST", body });
   },
+  uploadPdf: (id: string, file: File) => {
+    const body = new FormData();
+    body.append("file", file);
+    return request<Project>(`/api/projects/${id}/score-pdf`, { method: "POST", body });
+  },
   uploadAudio: (id: string, file: File) => {
     const body = new FormData();
     body.append("file", file);

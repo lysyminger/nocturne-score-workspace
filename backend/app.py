@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from backend.audio_analysis import analyze_audio_file
 from backend.bilibili import cache_bilibili_thumbnail, inspect_bilibili, parse_bilibili_source
 from backend.database import Database
+from backend.pdf_score_import import render_and_segment_pdf
 from backend.score_pdf import build_slice_preview_pdf
 from backend.security import hash_password, hash_session_token, new_session_token, verify_password
 from backend.tab_recognition import FrameInput as TabFrameInput
@@ -902,6 +903,149 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 page.close()
         return project_payload(row)
 
+    @api.post("/api/projects/{project_id}/score-pdf", status_code=202)
+    async def upload_score_pdf(
+        project_id: str,
+        background_tasks: BackgroundTasks,
+        file: Annotated[UploadFile, File(description="PDF 谱图")],
+        user: dict = Depends(current_user),
+    ) -> dict:
+        project = owned_project(project_id, user["id"])
+        if Path(file.filename or "").suffix.lower() != ".pdf":
+            raise HTTPException(status_code=422, detail="请选择 PDF 乐谱文件")
+        content = await read_bounded(file, MAX_SCORE_BYTES)
+        if not content.startswith(b"%PDF-"):
+            raise HTTPException(status_code=422, detail="文件不是有效 PDF")
+
+        upload_id = uuid.uuid4().hex
+        target_dir = projects_dir / project_id / "pdf-score" / upload_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = target_dir / "source-score.pdf"
+        pdf_path.write_bytes(content)
+        try:
+            imported = await run_in_threadpool(
+                render_and_segment_pdf,
+                pdf_path,
+                target_dir / "rendered",
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"PDF 分析失败：{str(exc)[:240]}") from exc
+
+        capabilities = capability_status()
+        page_rows = []
+        system_rows = []
+        now = utc_text()
+        for page in imported.pages:
+            page_rows.append(
+                (
+                    uuid.uuid4().hex,
+                    project_id,
+                    "score_image",
+                    f"{file.filename or 'PDF 乐谱'} · 第 {page.page_number} 页",
+                    str(page.path),
+                    "image/jpeg",
+                    json.dumps({"page_number": page.page_number, "width": page.width, "height": page.height}),
+                    page.page_number - 1,
+                    now,
+                )
+            )
+        tab_frames: list[TabFrameInput] = []
+        for index, system in enumerate(imported.systems):
+            sequence_seconds = float(index * 4)
+            metadata = {
+                "page_number": system.page_number,
+                "system_number": system.system_number,
+                "layout": system.layout,
+                "polarity": system.polarity,
+                "time_seconds": sequence_seconds,
+                "source_frame": index + 1,
+                "source_kind": "pdf_system",
+            }
+            system_rows.append(
+                (
+                    uuid.uuid4().hex,
+                    project_id,
+                    "score_system",
+                    f"第 {system.page_number} 页 · 谱行 {system.system_number}",
+                    str(system.path),
+                    "image/jpeg",
+                    json.dumps(metadata, ensure_ascii=False),
+                    index,
+                    now,
+                )
+            )
+            tab_frames.append(TabFrameInput(system.path, sequence_seconds, index + 1))
+
+        preliminary_summary = {
+            "engine": "pdf_layout",
+            "engine_label": "PDF 谱面布局分析",
+            "page_count": len(imported.pages),
+            "system_count": len(imported.systems),
+            "layout_counts": imported.layout_counts,
+            "warnings": ["PDF 已按谱行切分；自动识别结果仍需逐小节试听校对"],
+        }
+        if tab_frames and capabilities["tab_ocr"]:
+            next_status = "recognizing"
+            status_message = f"已拆分 {len(imported.pages)} 页、{len(tab_frames)} 行谱，正在识别品位、节奏与技巧…"
+        elif not tab_frames and capabilities["audiveris"]:
+            next_status = "recognizing"
+            status_message = f"已拆分 {len(imported.pages)} 页，正在识别印刷五线谱…"
+        elif tab_frames:
+            next_status = "pdf_ready"
+            status_message = f"已拆分 {len(imported.pages)} 页、{len(tab_frames)} 行 TAB；安装 Tesseract 后可自动识别"
+        else:
+            next_status = "pdf_ready"
+            status_message = f"已拆分 {len(imported.pages)} 页；未找到六线谱，安装 Audiveris 后可识别五线谱"
+
+        with db.connect() as connection:
+            connection.execute(
+                "DELETE FROM assets WHERE project_id = ? AND kind IN ('score_image', 'score_system')",
+                (project_id,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO assets(id, project_id, kind, original_name, stored_path, media_type,
+                    metadata, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                page_rows + system_rows,
+            )
+            connection.execute(
+                """
+                UPDATE projects SET score_pdf_path = ?, score_file_path = NULL, score_file_name = NULL,
+                    recognition_summary = ?, status = ?, status_message = ?, updated_at = ? WHERE id = ?
+                """,
+                (
+                    str(pdf_path),
+                    json.dumps(preliminary_summary, ensure_ascii=False),
+                    next_status,
+                    status_message,
+                    now,
+                    project_id,
+                ),
+            )
+            row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+
+        output_dir = projects_dir / project_id / "recognition" / uuid.uuid4().hex
+        if tab_frames and capabilities["tab_ocr"]:
+            background_tasks.add_task(
+                recognize_tab_job,
+                project_id,
+                project["title"],
+                tab_frames,
+                capabilities["tesseract_path"],
+                output_dir,
+                False,
+            )
+        elif not tab_frames and capabilities["audiveris"]:
+            background_tasks.add_task(
+                recognize_staff_job,
+                project_id,
+                str(pdf_path),
+                capabilities["audiveris_path"],
+                output_dir,
+            )
+        return project_payload(row)
+
     async def read_bounded(upload: UploadFile, limit: int) -> bytes:
         content = await upload.read(limit + 1)
         if len(content) > limit:
@@ -1193,6 +1337,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         frames: list[TabFrameInput],
         tesseract_path: str,
         output_dir: Path,
+        replace_pdf: bool = True,
     ) -> None:
         try:
             result = recognize_tab_frames(
@@ -1202,6 +1347,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 tesseract_path=tesseract_path,
             )
             summary = result.summary
+            with db.connect() as connection:
+                existing_row = connection.execute(
+                    "SELECT recognition_summary FROM projects WHERE id = ?", (project_id,)
+                ).fetchone()
+            existing_summary = json_object(existing_row["recognition_summary"]) if existing_row else None
+            if (existing_summary or {}).get("engine") == "pdf_layout":
+                summary["page_count"] = existing_summary.get("page_count")
+                summary["system_count"] = existing_summary.get("system_count")
+                summary["source_kind"] = "pdf"
+                summary["engine_label"] = "PDF 六线 TAB 专用识别（Beta）"
             message = (
                 f"已识别 {summary['measure_count']} 小节六线 TAB；"
                 "已按小节号去重并合成完整 PDF，请在保存前逐小节试听校对"
@@ -1216,7 +1371,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     (
                         str(result.score_path),
                         result.score_path.name,
-                        str(result.pdf_path) if result.pdf_path else None,
+                        str(result.pdf_path) if replace_pdf and result.pdf_path else None,
                         json.dumps(summary, ensure_ascii=False),
                         message,
                         utc_text(),
@@ -1241,7 +1396,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="当前项目正在识别，请等待完成")
         capabilities = capability_status()
         with db.connect() as connection:
-            frame_rows = connection.execute(
+            video_rows = connection.execute(
                 """
                 SELECT stored_path, metadata, sort_order FROM assets
                 WHERE project_id = ? AND kind = 'video_frame'
@@ -1249,6 +1404,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 """,
                 (project_id,),
             ).fetchall()
+            system_rows = connection.execute(
+                """
+                SELECT stored_path, metadata, sort_order FROM assets
+                WHERE project_id = ? AND kind = 'score_system'
+                ORDER BY sort_order, created_at
+                """,
+                (project_id,),
+            ).fetchall()
+        frame_rows = video_rows or system_rows
         tab_frames: list[TabFrameInput] = []
         for frame_row in frame_rows:
             metadata = json_object(frame_row["metadata"]) or {}
@@ -1288,6 +1452,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 tab_frames,
                 capabilities["tesseract_path"],
                 output_dir,
+                bool(video_rows),
             )
         else:
             background_tasks.add_task(
@@ -1364,7 +1529,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             rows = connection.execute(
                 """
                 SELECT stored_path, metadata, sort_order FROM assets
-                WHERE project_id = ? AND kind = 'video_frame'
+                WHERE project_id = ? AND kind IN ('video_frame', 'score_system')
                 ORDER BY sort_order, created_at
                 """,
                 (project_id,),
@@ -1377,7 +1542,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             metadata = json_object(row["metadata"]) or {}
             available.append((row, path, metadata))
         if not available:
-            raise HTTPException(status_code=404, detail="原始视频切片已经不存在，请重新切片")
+            raise HTTPException(status_code=404, detail="原始谱面切片已经不存在，请重新上传或切片")
         matching = [item for item in available if item[1].name == frame_info.get("name")]
         if matching:
             frame_row, frame_path, metadata = matching[0]

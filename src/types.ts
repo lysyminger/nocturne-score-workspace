@@ -18,6 +18,8 @@ export type RecognitionSummary = {
   engine: string;
   engine_label: string;
   measure_count?: number;
+  page_count?: number;
+  system_count?: number;
   start_measure?: number;
   end_measure?: number;
   estimated_tempo_bpm?: number;
@@ -30,6 +32,7 @@ export type RecognitionSummary = {
   total_glyphs?: number;
   low_confidence_glyphs?: number;
   layout_counts?: Record<string, number>;
+  technique_counts?: Record<string, number>;
   polarity_counts?: Record<string, number>;
   warnings?: string[];
 };

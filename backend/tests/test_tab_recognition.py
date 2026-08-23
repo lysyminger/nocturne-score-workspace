@@ -5,6 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from backend.tab_recognition import (
     DigitGlyph,
@@ -13,10 +14,13 @@ from backend.tab_recognition import (
     MeasureGeometry,
     NoteToken,
     ParsedFrame,
+    TechniqueMark,
     TabEvent,
     TabNote,
     _build_musicxml,
+    _candidate_from_geometry,
     _smooth_frame_starts,
+    _technique_from_text,
     append_blank_tab_measure,
     assign_rhythm_units,
     create_blank_tab_score,
@@ -40,6 +44,46 @@ def test_detects_six_line_staff_and_measure_bars():
 
     assert detected_lines == staff_lines
     assert np.allclose(boundaries, [10, 205, 400, 595, 790], atol=2)
+
+
+def test_measure_boundaries_keep_a_short_first_measure():
+    image = np.full((220, 900), 255, dtype=np.uint8)
+    staff_lines = [50, 68, 86, 104, 122, 140]
+    for y in staff_lines:
+        cv2.line(image, (0, y), (899, y), 228, 1)
+    for x in (10, 150, 500, 890):
+        cv2.line(image, (x, 50), (x, 140), 0, 2)
+
+    boundaries = detect_measure_boundaries(image, staff_lines)
+
+    assert np.allclose(boundaries, [10, 150, 500, 890], atol=2)
+
+
+@pytest.mark.parametrize(
+    ("text", "technique"),
+    [("H", "hammer_on"), ("P", "pull_off"), ("sl.", "slide"), ("P.M.", "palm_mute"), ("Full", "bend"), ("N.H.", "harmonic")],
+)
+def test_maps_printed_technique_labels(text, technique):
+    assert _technique_from_text(text) == technique
+
+
+def test_technique_mark_is_attached_to_the_preceding_note_group():
+    first = DigitGlyph(np.ones((8, 5), dtype=np.uint8), np.zeros((28, 20), dtype=np.uint8), label="5", confidence=90)
+    second = DigitGlyph(np.ones((8, 5), dtype=np.uint8), np.zeros((28, 20), dtype=np.uint8), label="7", confidence=90)
+    frame = ParsedFrame(
+        source=FrameInput(Path("printed.jpg"), 0),
+        gray=np.full((200, 300), 255, dtype=np.uint8),
+        staff_lines=[50, 68, 86, 104, 122, 140],
+        measures=[MeasureGeometry(10, 290, None)],
+        tokens=[NoteToken(80, 1, [first], 1), NoteToken(180, 1, [second], 1)],
+        highlighted_index=None,
+        technique_marks=[TechniqueMark(125, "hammer_on", "H", 92)],
+    )
+
+    candidate = _candidate_from_geometry(frame, 0, 1)
+
+    assert candidate.events[0].notes[0].technique == "hammer_on"
+    assert candidate.events[1].notes[0].technique is None
 
 
 def test_detects_light_tab_lines_on_dark_video_overlay():

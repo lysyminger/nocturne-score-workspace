@@ -735,6 +735,25 @@ function ProjectWorkspace({
     }, "PDF 已生成");
   }
 
+  function uploadScorePdf(file: File) {
+    if (!confirmDiscardScoreChanges()) return;
+    void run("pdf", async () => {
+      await api.uploadPdf(projectId, file);
+      setScoreDirty(false);
+      setRecognition(null);
+      setViewMode("images");
+    }, "PDF 已拆页并开始自动识别");
+  }
+
+  function uploadVisualScore(files: FileList) {
+    const selected = Array.from(files);
+    if (selected.length === 1 && (selected[0].type === "application/pdf" || selected[0].name.toLowerCase().endsWith(".pdf"))) {
+      uploadScorePdf(selected[0]);
+      return;
+    }
+    uploadScoreImages(files);
+  }
+
   function importScore(file: File) {
     if (!confirmDiscardScoreChanges()) return;
     void run("score", async () => {
@@ -790,6 +809,17 @@ function ProjectWorkspace({
   const canAlign = Boolean(practiceAudioUrl && hasVisualScore);
   const isManualTab = project.source_kind === "manual_tab";
   const canReview = ["tab_cv_tesseract", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "");
+  const pdfTabSystems = Object.entries(project.recognition_summary?.layout_counts ?? {}).reduce(
+    (total, [layout, count]) => total + (layout.includes("tab") ? count : 0),
+    0
+  );
+  const hasPdfTab = project.recognition_summary?.engine === "pdf_layout" && pdfTabSystems > 0;
+  const recognizedTechniqueCount = Object.values(project.recognition_summary?.technique_counts ?? {}).reduce((total, count) => total + count, 0);
+  const canStartRecognition = project.video_frames.length
+    ? capabilities.tab_ocr
+    : hasPdfTab
+      ? capabilities.tab_ocr
+      : Boolean(project.pdf_url && capabilities.audiveris);
   const stageTitle =
     isManualTab
       ? "六线谱打谱与播放"
@@ -848,6 +878,7 @@ function ProjectWorkspace({
                 </div>
               )}
               {viewMode !== "score" && project.pdf_url && <a className="quiet-button" href={`${project.pdf_url}?download=1`} download><FileText size={15} /> 导出 PDF</a>}
+              <label className="quiet-button file-label"><FileText size={15} /> 上传 PDF<input type="file" accept="application/pdf,.pdf" onChange={(event) => { const file = event.target.files?.[0]; if (file) uploadScorePdf(file); event.currentTarget.value = ""; }} /></label>
               <label className="quiet-button file-label"><ImagePlus size={15} /> 上传谱图<input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) uploadScoreImages(event.target.files); event.currentTarget.value = ""; }} /></label>
               <label className="quiet-button file-label" title="导入 Guitar Pro 3–8 或 MusicXML"><FileMusic size={15} /> 导入 GTP / GP<input type="file" accept=".gp,.gp3,.gp4,.gp5,.gpx,.musicxml,.xml,.mxl" onChange={(event) => { const file = event.target.files?.[0]; if (file) importScore(file); event.currentTarget.value = ""; }} /></label>
             </div>
@@ -930,8 +961,8 @@ function ProjectWorkspace({
                 <span className="drop-icon"><Upload size={24} /></span>
                 <h3>先解析并获取视频</h3>
                 <p>视频准备完成后，这里会出现时间范围、画面框选和抽帧间隔工具；也可以直接上传谱图。</p>
-                <strong>{action === "images" ? "正在生成 PDF…" : "选择谱图"}</strong>
-                <input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) uploadScoreImages(event.target.files); event.currentTarget.value = ""; }} />
+                <strong>{action === "images" || action === "pdf" ? "正在分析谱面…" : "选择 PDF 或谱图"}</strong>
+                <input type="file" accept="application/pdf,.pdf,image/*" multiple onChange={(event) => { if (event.target.files?.length) uploadVisualScore(event.target.files); event.currentTarget.value = ""; }} />
               </label>
             )}
           </div>
@@ -978,12 +1009,12 @@ function ProjectWorkspace({
           )}
 
           <section className="inspector-section">
-            <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>{isManualTab ? "乐谱结构" : "乐谱识别"}</h3><p>{isManualTab ? "可保存的六线谱事件模型" : project.video_frames.length ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
-            <p className="inspector-copy">{isManualTab ? "同一时间格的六根弦可以组成和弦；删除只影响当前弦。音符、时值和技巧保存后会重建可播放的 MusicXML。" : project.video_frames.length ? "从原始切片识别弦号、品位和八分音符网格，按小节号去重合成完整 PDF；校对器可用数字键改品位，并添加连音、滑音、击勾弦、推弦等技巧。" : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
-            {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 覆盖置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}{typeof project.recognition_summary.glyph_coverage === "number" ? ` · 数字覆盖 ${Math.round(project.recognition_summary.glyph_coverage * 100)}%` : ""}</p>}
-            {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || action === "recognize" || project.status === "recognizing" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
+            <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>{isManualTab ? "乐谱结构" : "乐谱识别"}</h3><p>{isManualTab ? "可保存的六线谱事件模型" : project.video_frames.length || hasPdfTab ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
+            <p className="inspector-copy">{isManualTab ? "同一时间格的六根弦可以组成和弦；删除只影响当前弦。音符、时值和技巧保存后会重建可播放的 MusicXML。" : project.video_frames.length ? "从原始切片识别弦号、品位和节奏网格，按小节号去重；校对器可继续修正时值与技巧。" : hasPdfTab ? `PDF 已自动拆成 ${project.recognition_summary?.system_count ?? pdfTabSystems} 行谱；六线谱负责弦与品位，检测到上五线谱时会保留为节奏和小节对照。` : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
+            {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.page_count ? ` · ${project.recognition_summary.page_count} 页` : ""}{project.recognition_summary.system_count ? ` · ${project.recognition_summary.system_count} 行谱` : ""}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{recognizedTechniqueCount ? ` · ${recognizedTechniqueCount} 个技巧标记` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 覆盖置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}{typeof project.recognition_summary.glyph_coverage === "number" ? ` · 数字覆盖 ${Math.round(project.recognition_summary.glyph_coverage * 100)}%` : ""}</p>}
+            {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || action === "recognize" || project.status === "recognizing" || !canStartRecognition} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
               {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
-              {project.video_frames.length ? (capabilities.tab_ocr ? "识别视频六线 TAB" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}
+              {project.video_frames.length ? (capabilities.tab_ocr ? "识别视频六线 TAB" : "安装 TAB OCR 后可用") : hasPdfTab ? (capabilities.tab_ocr ? "重新识别 PDF 六线 TAB" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}
             </button>}
           </section>
 

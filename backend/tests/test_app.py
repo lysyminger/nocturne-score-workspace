@@ -9,6 +9,7 @@ from PIL import Image
 
 from backend.app import create_app
 from backend.bilibili import parse_bilibili_source
+from backend.pdf_score_import import PdfPage, PdfScoreImport, PdfScoreSystem
 from backend.video_analysis import ExtractedFrame, VideoProbe, estimate_frame_count, normalized_crop_to_pixels
 from backend.tab_recognition import TabRecognitionResult
 
@@ -226,6 +227,69 @@ def test_score_images_become_pdf_and_remain_private(client: TestClient):
 
     second_client = TestClient(client.app)
     assert second_client.get(payload["pdf_url"]).status_code == 401
+
+
+def test_pdf_score_upload_splits_pages_and_starts_tab_recognition(client: TestClient, monkeypatch, tmp_path):
+    register(client)
+    project = client.post(
+        "/api/projects",
+        json={"source_input": "av170001", "title": "PDF TAB", "rights_confirmed": False},
+    ).json()
+    page_path = tmp_path / "page.jpg"
+    system_path = tmp_path / "system.jpg"
+    Image.new("RGB", (900, 1200), "white").save(page_path)
+    Image.new("RGB", (900, 260), "white").save(system_path)
+    monkeypatch.setattr(
+        "backend.app.render_and_segment_pdf",
+        lambda *_args: PdfScoreImport(
+            pages=(PdfPage(page_path, 1, 900, 1200),),
+            systems=(PdfScoreSystem(system_path, 1, 1, "staff_tab_pair", "dark_on_light"),),
+            layout_counts={"staff_tab_pair": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.app.capability_status",
+        lambda: {
+            "ffmpeg": True,
+            "yt_dlp": True,
+            "audiveris": False,
+            "audiveris_path": None,
+            "tab_ocr": True,
+            "tesseract_path": "tesseract",
+            "audio_analysis": True,
+        },
+    )
+
+    def fake_recognize(frames, output_dir, **_kwargs):
+        assert len(frames) == 1
+        assert frames[0].path == system_path
+        output_dir.mkdir(parents=True)
+        score = output_dir / "recognized.musicxml"
+        score.write_text("<score-partwise version='4.0'/>", encoding="utf-8")
+        diagnostics = output_dir / "recognition.json"
+        diagnostics.write_text('{"summary":{"engine":"tab_cv_tesseract"},"frames":[],"measures":[]}', encoding="utf-8")
+        return TabRecognitionResult(
+            score,
+            diagnostics,
+            {"engine": "tab_cv_tesseract", "engine_label": "PDF TAB 识别", "measure_count": 3},
+        )
+
+    monkeypatch.setattr("backend.app.recognize_tab_frames", fake_recognize)
+    response = client.post(
+        f"/api/projects/{project['id']}/score-pdf",
+        files={"file": ("score.pdf", b"%PDF-1.4\nmock", "application/pdf")},
+    )
+
+    assert response.status_code == 202
+    uploaded = response.json()
+    assert uploaded["recognition_summary"]["engine"] == "pdf_layout"
+    assert uploaded["recognition_summary"]["layout_counts"] == {"staff_tab_pair": 1}
+    assert len(uploaded["score_images"]) == 1
+    completed = client.get(f"/api/projects/{project['id']}").json()
+    assert completed["status"] == "score_ready"
+    assert completed["recognition_summary"]["measure_count"] == 3
+    assert client.get(completed["pdf_url"]).content == b"%PDF-1.4\nmock"
+    assert client.get(completed["score_file_url"]).status_code == 200
 
 
 def test_download_requires_rights_confirmation(client: TestClient):

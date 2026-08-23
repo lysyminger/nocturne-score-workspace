@@ -493,12 +493,14 @@ function ProjectWorkspace({
   const [recognitionRetry, setRecognitionRetry] = useState(0);
   const [scoreRevision, setScoreRevision] = useState("");
   const [scoreDirty, setScoreDirty] = useState(false);
-  const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
+  const [stageViewport, setStageViewport] = useState<HTMLDivElement | null>(null);
+  const [scoreViewport, setScoreViewport] = useState<HTMLDivElement | null>(null);
   const [viewMode, setViewMode] = useState<"video" | "frames" | "images" | "score">("video");
   const audioRef = useRef<HTMLAudioElement>(null);
   const initializedViewRef = useRef(false);
   const previousStatusRef = useRef<string | null>(null);
-  const viewportCallback = useCallback((node: HTMLDivElement | null) => setViewport(node), []);
+  const viewportCallback = useCallback((node: HTMLDivElement | null) => setStageViewport(node), []);
+  const viewport = viewMode === "score" ? scoreViewport : stageViewport;
 
   const refresh = async () => {
     const value = await api.project(projectId);
@@ -847,7 +849,7 @@ function ProjectWorkspace({
               )}
               {viewMode !== "score" && project.pdf_url && <a className="quiet-button" href={`${project.pdf_url}?download=1`} download><FileText size={15} /> 导出 PDF</a>}
               <label className="quiet-button file-label"><ImagePlus size={15} /> 上传谱图<input type="file" accept="image/*" multiple onChange={(event) => { if (event.target.files?.length) uploadScoreImages(event.target.files); event.currentTarget.value = ""; }} /></label>
-              <label className="quiet-button file-label"><FileMusic size={15} /> 导入乐谱<input type="file" accept=".gp,.gp3,.gp4,.gp5,.gpx,.musicxml,.xml,.mxl" onChange={(event) => { const file = event.target.files?.[0]; if (file) importScore(file); event.currentTarget.value = ""; }} /></label>
+              <label className="quiet-button file-label" title="导入 Guitar Pro 3–8 或 MusicXML"><FileMusic size={15} /> 导入 GTP / GP<input type="file" accept=".gp,.gp3,.gp4,.gp5,.gpx,.musicxml,.xml,.mxl" onChange={(event) => { const file = event.target.files?.[0]; if (file) importScore(file); event.currentTarget.value = ""; }} /></label>
             </div>
           </div>
 
@@ -892,7 +894,6 @@ function ProjectWorkspace({
                   <Suspense fallback={<div className="score-loading"><LoaderCircle size={20} className="spin" /> 正在载入乐谱引擎</div>}>
                     <AlphaTabPlayer
                     scoreUrl={`${project.score_file_url}?v=${encodeURIComponent(scoreRevision || project.score_file_url)}`}
-                    scrollElement={viewport}
                     masterVolume={scoreVolume}
                     fileBaseName={project.title}
                     pdfUrl={project.pdf_url}
@@ -903,6 +904,8 @@ function ProjectWorkspace({
                     editingDisabled={["recognize", "review-recognize", "review-append"].includes(action ?? "") || project.status === "recognizing"}
                     onFocusMeasure={() => undefined}
                     onDirtyChange={setScoreDirty}
+                    onImportScore={importScore}
+                    onScrollElementChange={setScoreViewport}
                     onSaveScore={saveEditedScore}
                     onSaveRecognition={saveRecognitionChanges}
                     onRetryRecognition={retryScoreMeasure}

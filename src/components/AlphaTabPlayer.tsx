@@ -776,11 +776,15 @@ export function AlphaTabPlayer({
 
   function stringYForBeatBounds(bounds: alphaTab.rendering.BeatBounds, alphaString: number) {
     const barBounds = bounds.barBounds;
-    const staff = bounds.beat.voice.bar.staff;
+    const staff = bounds.beat?.voice?.bar?.staff;
+    if (!staff) {
+      const visualString = 7 - alphaString;
+      return bounds.realBounds.y + bounds.realBounds.h * ((visualString - 0.5) / 6);
+    }
     const stringCount = staff.tuning.length || 6;
     const systemBars = barBounds.masterBarBounds.staffSystemBounds?.bars
       .flatMap((master) => master.bars)
-      .filter((candidate) => candidate.beats.some((beatBounds) => beatBounds.beat.voice.bar.staff === staff)) ?? [barBounds];
+      .filter((candidate) => candidate.beats.some((beatBounds) => beatBounds.beat?.voice?.bar?.staff === staff)) ?? [barBounds];
     const samples = systemBars.flatMap((candidate) => candidate.beats.flatMap((beatBounds) =>
       (beatBounds.notes ?? []).map((noteBounds) => ({
         string: noteBounds.note.string,
@@ -860,8 +864,8 @@ export function AlphaTabPlayer({
       const clientTop = hostRect.top + masterBounds.realBounds.y;
       const clientBottom = clientTop + masterBounds.realBounds.h;
       if (viewportRect && (clientBottom < viewportRect.top - 240 || clientTop > viewportRect.bottom + 240)) continue;
-      const barBounds = masterBounds.bars.find((candidate) => candidate.beats.some((beatBounds) => (beatBounds.beat.voice.bar.staff.tuning.length || 0) > 0));
-      const modelBar = barBounds?.beats[0]?.beat.voice.bar;
+      const barBounds = masterBounds.bars.find((candidate) => candidate.beats.some((beatBounds) => Boolean(beatBounds.beat?.voice?.bar?.staff?.tuning?.length)));
+      const modelBar = barBounds?.beats.find((beatBounds) => beatBounds.beat?.voice?.bar)?.beat?.voice?.bar;
       const voice = modelBar?.voices[0];
       if (!barBounds || !modelBar || !voice) continue;
       const stringCount = modelBar.staff.tuning.length || 6;

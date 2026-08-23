@@ -832,7 +832,7 @@ function ProjectWorkspace({
       </div>
 
       <div className="workspace-layout">
-        <section className="score-stage">
+        <section className={`score-stage ${viewMode === "score" ? "score-mode" : ""}`}>
           <div className="stage-toolbar">
             <div>
               <span className="stage-kicker">SCORE WORKSPACE</span>

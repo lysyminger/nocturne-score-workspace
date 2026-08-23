@@ -411,7 +411,7 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .alpha-export-actions button { min-height: 1.85rem; display: inline-flex; align-items: center; justify-content: center; gap: .26rem; padding: .35rem .48rem; border: 0; border-radius: .46rem; color: #9998a4; font-size: .54rem; background: rgba(255,255,255,.045); cursor: pointer; transition: color .18s ease, background .18s ease, transform .12s ease, opacity .18s ease; }
 .alpha-export-actions button:hover:not(:disabled) { color: #e2e0ff; background: rgba(139,130,255,.14); }.alpha-export-actions button:active:not(:disabled) { transform: scale(.96); }.alpha-export-actions button:disabled { opacity: .38; cursor: not-allowed; }
 .alpha-status { display: flex; align-items: center; gap: .4rem; padding: 0 .5rem 0 .15rem; color: #8c8c95; font-size: .58rem; }
-.at-cursor-bar { background: rgba(111, 101, 213, .17) !important; }.at-cursor-beat { width: 2px !important; background: #6f65d5 !important; }.at-highlight * { fill: #675ec7 !important; stroke: #675ec7 !important; }
+.at-cursor-bar { background: rgba(218, 169, 62, .16) !important; }.at-cursor-beat { width: 2px !important; background: rgba(197, 143, 36, .92) !important; box-shadow: 0 0 0 1px rgba(255,245,205,.46), 0 0 10px rgba(197,143,36,.28); }.at-highlight * { fill: #675ec7 !important; stroke: #675ec7 !important; }
 
 /* Direct score editing studio */
 .score-studio {
@@ -728,15 +728,6 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 }
 .score-selection-layer .measure-error-marker::after { display: none; }
 .score-selection-layer .measure-error-marker b { position: absolute; top: -1.05rem; right: .15rem; padding: .08rem .28rem; border-radius: .26rem; color: #d95a62; font: 650 .48rem/1.25 system-ui; white-space: nowrap; background: rgba(255,244,245,.92); }
-.score-selection-layer .score-lasso {
-  z-index: 6;
-  border: 1px solid rgba(113,101,222,.88);
-  border-radius: .18rem;
-  background: rgba(118,105,231,.1);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.5), 0 4px 18px rgba(74,61,181,.12);
-  animation: none;
-}
-.score-selection-layer .score-lasso::after { display: none; }
 
 @keyframes score-selection-in {
   from { opacity: 0; transform: scale(.82); }
@@ -880,6 +871,68 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .score-review-shell.embedded { width: 100%; display: block; }
 .score-review-shell.embedded .review-source-panel { display: none; }
 .score-review-shell.embedded .review-editor-panel { border: 0; border-radius: 0; box-shadow: none; }
+
+@media (min-width: 801px) {
+  .score-stage.score-mode { display: block; }
+  .score-stage.score-mode > .stage-toolbar {
+    position: absolute;
+    z-index: 18;
+    top: 0;
+    right: 0;
+    left: 0;
+    background: linear-gradient(180deg, rgba(16,16,20,.96), rgba(16,16,20,.82));
+    backdrop-filter: blur(22px) saturate(135%);
+  }
+  .score-stage.score-mode > .score-viewport.score-workspace { height: 100%; padding: 0; }
+  .score-stage.score-mode .score-studio-commandbar {
+    position: absolute;
+    top: 5rem;
+    left: 50%;
+    margin: 0;
+    transform: translateX(-50%);
+  }
+  .score-stage.score-mode .score-structure-toolbar {
+    position: absolute;
+    z-index: 11;
+    top: 9.55rem;
+    left: 50%;
+    margin: 0;
+    transform: translateX(-50%);
+  }
+  .score-stage.score-mode .studio-keyboard-hint {
+    position: absolute;
+    z-index: 10;
+    top: 12.7rem;
+    left: 50%;
+    width: min(calc(100% - 2rem), 66rem);
+    margin: 0;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    justify-content: start;
+    transform: translateX(-50%);
+    scrollbar-width: none;
+  }
+  .score-stage.score-mode .studio-keyboard-hint::-webkit-scrollbar { display: none; }
+  .score-stage.score-mode .shortcut-help-panel {
+    position: absolute;
+    z-index: 14;
+    top: 14.55rem;
+    left: 50%;
+    margin: 0;
+    transform: translateX(-50%);
+  }
+  .score-stage.score-mode .score-canvas-panel {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    margin: 0;
+    padding: .8rem;
+    border-radius: 0;
+  }
+  .score-stage.score-mode .score-canvas-content { padding-top: 14.6rem; }
+}
 
 @media (max-width: 1100px) {
   .auth-shell { grid-template-columns: 1fr 25rem; }

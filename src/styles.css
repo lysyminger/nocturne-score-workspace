@@ -724,6 +724,8 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   border-radius: .22rem;
   background: rgba(118,105,231,.13);
   box-shadow: 0 0 0 2px rgba(255,255,255,.78), 0 0 0 4px rgba(112,99,218,.2), 0 4px 16px rgba(74,61,181,.24);
+  animation: none;
+  transition: none;
 }
 .score-selection-layer .score-cell-cursor::before { content: ""; position: absolute; top: 50%; left: 3px; right: 3px; height: 1px; background: #7268d9; transform: translateY(-50%); }
 .score-selection-layer .score-cell-cursor::after { background: #7268d9; }

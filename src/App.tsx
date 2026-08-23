@@ -704,17 +704,20 @@ function ProjectWorkspace({
     }
   }
 
-  async function appendScoreMeasure() {
-    if (!project) return;
+  async function appendScoreMeasure(afterMeasure?: number) {
+    if (!project) return false;
     setAction("review-append");
     try {
-      const diagnostics = await api.appendRecognitionMeasure(project.id);
+      const diagnostics = await api.appendRecognitionMeasure(project.id, afterMeasure);
       setRecognition(diagnostics);
       const refreshed = await refresh();
       setScoreRevision(refreshed.updated_at);
-      showNotice({ message: `已在谱面末尾添加第 ${diagnostics.summary.end_measure} 小节`, tone: "success" });
+      const insertedMeasure = afterMeasure === undefined ? diagnostics.summary.end_measure : afterMeasure + 1;
+      showNotice({ message: `已插入第 ${insertedMeasure} 小节`, tone: "success" });
+      return true;
     } catch (error) {
       showNotice({ message: error instanceof Error ? error.message : "添加小节失败", tone: "error" });
+      return false;
     } finally {
       setAction(null);
     }

@@ -1609,6 +1609,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @api.post("/api/projects/{project_id}/recognition/measures", status_code=201)
     def append_recognition_measure(
         project_id: str,
+        after_measure: int | None = None,
         user: dict = Depends(current_user),
     ) -> dict:
         project = owned_project(project_id, user["id"])
@@ -1618,13 +1619,22 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 score_path,
                 diagnostics_path,
                 title=project["title"],
+                after_measure=after_measure,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         summary = diagnostics.get("summary") or {}
-        next_measure = int(summary.get("end_measure") or 1)
+        inserted_measure = int(after_measure) + 1 if after_measure is not None else int(summary.get("end_measure") or 1)
         now = utc_text()
         with db.connect() as connection:
+            if after_measure is not None:
+                connection.execute(
+                    """
+                    UPDATE sync_points SET measure_number = measure_number + 1
+                    WHERE project_id = ? AND measure_number > ?
+                    """,
+                    (project_id, after_measure),
+                )
             connection.execute(
                 """
                 UPDATE projects SET recognition_summary = ?, status_message = ?, updated_at = ?
@@ -1632,7 +1642,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 """,
                 (
                     json.dumps(summary, ensure_ascii=False),
-                    f"已添加第 {next_measure} 小节，乐谱已重新生成",
+                    f"已插入第 {inserted_measure} 小节，乐谱已重新生成",
                     now,
                     project_id,
                 ),

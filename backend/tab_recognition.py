@@ -1918,8 +1918,9 @@ def append_blank_tab_measure(
     diagnostics_path: Path,
     *,
     title: str,
+    after_measure: int | None = None,
 ) -> dict:
-    """Append one empty measure and atomically rebuild the editable MusicXML score."""
+    """Insert one empty measure and atomically rebuild the editable MusicXML score."""
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     summary = diagnostics.get("summary") or {}
     start_measure = int(summary.get("start_measure") or 1)
@@ -1927,8 +1928,17 @@ def append_blank_tab_measure(
     if end_measure - start_measure + 1 >= 128:
         raise ValueError("当前最多支持 128 小节")
 
-    next_number = end_measure + 1
     measure_rows = diagnostics.setdefault("measures", [])
+    insert_after = end_measure if after_measure is None else int(after_measure)
+    if insert_after < start_measure or insert_after > end_measure:
+        raise ValueError(f"插入位置必须在第 {start_measure}～{end_measure} 小节")
+    next_number = insert_after + 1
+    for row in measure_rows:
+        if int(row["number"]) > insert_after:
+            row["number"] = int(row["number"]) + 1
+    for frame in diagnostics.get("frames", []):
+        if frame.get("start_measure") is not None and int(frame["start_measure"]) > insert_after:
+            frame["start_measure"] = int(frame["start_measure"]) + 1
     measure_rows.append(
         {
             "number": next_number,
@@ -1950,12 +1960,13 @@ def append_blank_tab_measure(
     )
     measure_rows.sort(key=lambda row: int(row["number"]))
     summary["start_measure"] = start_measure
-    summary["end_measure"] = next_number
+    summary["end_measure"] = end_measure + 1
     summary["measure_count"] = len(measure_rows)
-    summary["invalid_measures"] = sorted({
-        *(int(value) for value in summary.get("invalid_measures", [])),
-        next_number,
-    })
+    shifted_invalid = {
+        int(value) + 1 if int(value) > insert_after else int(value)
+        for value in summary.get("invalid_measures", [])
+    }
+    summary["invalid_measures"] = sorted({*shifted_invalid, next_number})
     diagnostics["summary"] = summary
 
     candidates: dict[int, MeasureCandidate] = {}

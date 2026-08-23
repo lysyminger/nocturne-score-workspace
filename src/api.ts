@@ -78,8 +78,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ events, ...(timeSignature ? { time_signature: timeSignature } : {}) })
     }),
-  appendRecognitionMeasure: (id: string) =>
-    request<RecognitionDiagnostics>(`/api/projects/${id}/recognition/measures`, { method: "POST" }),
+  appendRecognitionMeasure: (id: string, afterMeasure?: number) =>
+    request<RecognitionDiagnostics>(
+      `/api/projects/${id}/recognition/measures${afterMeasure === undefined ? "" : `?after_measure=${afterMeasure}`}`,
+      { method: "POST" }
+    ),
   uploadImages: (id: string, files: FileList | File[]) => {
     const body = new FormData();
     Array.from(files).forEach((file) => body.append("files", file));

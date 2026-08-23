@@ -160,6 +160,37 @@ def test_manual_tab_api_accepts_explicit_rests_and_reports_complete_bar(client: 
     assert payload["summary"]["invalid_measures"] == []
 
 
+def test_manual_tab_can_insert_measure_and_shift_later_sync_points(client: TestClient):
+    register(client)
+    project = client.post(
+        "/api/projects/manual-tab",
+        json={"title": "插入小节测试", "measure_count": 3, "tempo_bpm": 100},
+    ).json()
+    client.patch(
+        f"/api/projects/{project['id']}/recognition/measures/3",
+        json={
+            "events": [
+                {"onset_eighths": 0, "duration_eighths": 2, "notes": [{"string": 1, "fret": 9}]},
+            ]
+        },
+    )
+    client.post(
+        f"/api/projects/{project['id']}/sync-points",
+        json={"measure_number": 3, "time_seconds": 5, "score_position": 0.5, "label": "原第三小节"},
+    )
+
+    inserted = client.post(f"/api/projects/{project['id']}/recognition/measures?after_measure=1")
+
+    assert inserted.status_code == 201
+    payload = inserted.json()
+    assert payload["summary"]["end_measure"] == 4
+    assert [measure["number"] for measure in payload["measures"]] == [1, 2, 3, 4]
+    assert payload["measures"][1]["events"] == []
+    assert payload["measures"][3]["events"][0]["notes"][0]["fret"] == 9
+    persisted = client.get(f"/api/projects/{project['id']}").json()
+    assert persisted["sync_points"][0]["measure_number"] == 4
+
+
 def test_inspect_caches_private_cover_for_library(client: TestClient, monkeypatch):
     register(client)
     project = client.post(

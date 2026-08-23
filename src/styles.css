@@ -586,8 +586,10 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .score-export-menu > div small { grid-column: 2; color: #797984; font-size: .58rem; line-height: 1.2; }
 
 .score-structure-toolbar { width: min(100%, 66rem); min-height: 2.65rem; margin: -.35rem auto .55rem; display: flex; align-items: center; justify-content: center; gap: .55rem; padding: .35rem .45rem; border: 1px solid rgba(255,255,255,.075); border-radius: .72rem; color: #6f6f7a; background: linear-gradient(100deg, rgba(112,101,213,.085), rgba(255,255,255,.018) 55%, rgba(0,0,0,.07)); }
-.bars-per-row-control, .direct-duration-control { display: flex; align-items: center; gap: .22rem; }
+.bars-per-row-control, .direct-duration-control, .score-string-picker { display: flex; align-items: center; gap: .22rem; }
 .bars-per-row-control { padding-right: .55rem; border-right: 1px solid rgba(255,255,255,.07); }
+.score-string-picker { padding-left: .55rem; border-left: 1px solid rgba(255,255,255,.07); }
+.score-string-picker button { min-width: 1.75rem; }
 .score-structure-toolbar span { margin-right: .15rem; font-size: .52rem; white-space: nowrap; }
 .score-structure-toolbar button { min-width: 2rem; min-height: 1.75rem; padding: .25rem .4rem; border: 1px solid transparent; border-radius: .42rem; color: #868690; font-size: .5rem; font-variant-numeric: tabular-nums; background: transparent; cursor: pointer; }
 .score-structure-toolbar button:hover:not(:disabled) { color: #e4e1ff; background: rgba(139,130,255,.1); }.score-structure-toolbar button:active:not(:disabled) { transform: scale(.96); }.score-structure-toolbar button.active { color: #f1efff; border-color: rgba(163,155,255,.3); background: rgba(139,130,255,.17); }.score-structure-toolbar button:disabled { opacity: .3; cursor: not-allowed; }
@@ -667,6 +669,23 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   animation: score-selection-in .16s cubic-bezier(.2,.8,.2,1);
 }
 .score-selection-layer i::after { content: ""; position: absolute; top: -3px; right: -3px; width: 5px; height: 5px; border-radius: 50%; background: #7268d9; box-shadow: 0 0 0 1px #fff; }
+.score-selection-layer .score-cell-cursor {
+  border-color: rgba(240,197,105,.95);
+  border-radius: .22rem;
+  background: rgba(240,197,105,.16);
+  box-shadow: 0 0 0 2px rgba(11,11,14,.82), 0 0 0 3px rgba(240,197,105,.35), 0 4px 16px rgba(127,88,25,.24);
+}
+.score-selection-layer .score-cell-cursor::before { content: ""; position: absolute; top: 50%; left: 3px; right: 3px; height: 1px; background: #f0c569; transform: translateY(-50%); }
+.score-selection-layer .score-cell-cursor::after { background: #f0c569; }
+.score-selection-layer .measure-error-marker {
+  border: 1.5px solid rgba(229,82,91,.82);
+  border-radius: .42rem;
+  background: rgba(210,45,56,.035);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.4), 0 0 0 2px rgba(201,46,57,.08);
+  animation: none;
+}
+.score-selection-layer .measure-error-marker::after { display: none; }
+.score-selection-layer .measure-error-marker b { position: absolute; top: -1.05rem; right: .15rem; padding: .08rem .28rem; border-radius: .26rem; color: #d95a62; font: 650 .48rem/1.25 system-ui; background: rgba(255,244,245,.92); }
 
 @keyframes score-selection-in {
   from { opacity: 0; transform: scale(.82); }

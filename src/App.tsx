@@ -35,9 +35,8 @@ import {
   Waves
 } from "lucide-react";
 import { api } from "./api";
-import { ScoreReviewPanel } from "./components/ScoreReviewPanel";
 import { VideoSliceEditor } from "./components/VideoSliceEditor";
-import type { Capabilities, Project, RecognitionDiagnostics, RecognitionEvent, RecognitionMeasure, SyncPoint, User, VideoAnalysisRequest } from "./types";
+import type { Capabilities, Project, RecognitionDiagnostics, RecognitionEvent, SyncPoint, User, VideoAnalysisRequest } from "./types";
 
 const AlphaTabPlayer = lazy(() =>
   import("./components/AlphaTabPlayer").then((module) => ({ default: module.AlphaTabPlayer }))
@@ -494,9 +493,6 @@ function ProjectWorkspace({
   const [recognitionRetry, setRecognitionRetry] = useState(0);
   const [scoreRevision, setScoreRevision] = useState("");
   const [scoreDirty, setScoreDirty] = useState(false);
-  const [reviewDirty, setReviewDirty] = useState(false);
-  const [reviewMeasure, setReviewMeasure] = useState(1);
-  const [reviewOpen, setReviewOpen] = useState(false);
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [viewMode, setViewMode] = useState<"video" | "frames" | "images" | "score">("video");
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -520,7 +516,6 @@ function ProjectWorkspace({
           ? "frames"
           : "video"
       );
-      if (["tab_cv_tesseract", "tab_manual_editor"].includes(value.recognition_summary?.engine ?? "")) setReviewOpen(true);
       initializedViewRef.current = true;
     } else if (previousStatus === "analyzing" && value.video_frames.length) {
       setViewMode("frames");
@@ -529,8 +524,6 @@ function ProjectWorkspace({
       setScoreRevision(value.updated_at);
       setRecognition(null);
       setRecognitionLoadError(null);
-      setReviewDirty(false);
-      setReviewOpen(["tab_cv_tesseract", "tab_manual_editor"].includes(value.recognition_summary?.engine ?? ""));
     }
     previousStatusRef.current = value.status;
     setMeasure(Math.max(1, ...value.sync_points.map((point) => point.measure_number + 1)));
@@ -545,8 +538,6 @@ function ProjectWorkspace({
     setRecognitionRetry(0);
     setScoreRevision("");
     setScoreDirty(false);
-    setReviewDirty(false);
-    setReviewOpen(false);
     setLoading(true);
     refresh()
       .catch((error) => showNotice({ message: error.message, tone: "error" }))
@@ -568,14 +559,14 @@ function ProjectWorkspace({
   }, [project?.audio_url]);
 
   useEffect(() => {
-    if (!scoreDirty && !reviewDirty) return;
+    if (!scoreDirty) return;
     const handler = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [reviewDirty, scoreDirty]);
+  }, [scoreDirty]);
 
   useEffect(() => {
     if (!project || action === "recognize" || project.status === "recognizing" || viewMode !== "score" || recognition || !["tab_cv_tesseract", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "")) return;
@@ -585,7 +576,6 @@ function ProjectWorkspace({
       .then((diagnostics) => {
         if (!active) return;
         setRecognition(diagnostics);
-        setReviewMeasure(diagnostics.summary.start_measure ?? diagnostics.measures[0]?.number ?? 1);
       })
       .catch((error) => {
         if (!active) return;
@@ -598,8 +588,6 @@ function ProjectWorkspace({
     if (key === "recognize") {
       setRecognition(null);
       setRecognitionLoadError(null);
-      setReviewDirty(false);
-      setReviewOpen(false);
     }
     setAction(key);
     try {
@@ -636,60 +624,10 @@ function ProjectWorkspace({
         )[0];
         if (frame.start_measure !== null) target = frame.start_measure + (frame.highlighted_index ?? 0);
       }
-      setReviewMeasure(target);
       setViewMode("score");
-      setReviewOpen(true);
+      showNotice({ message: `已打开第 ${target} 小节所在的可播放谱面，直接点击音符或空拍即可校对`, tone: "success" });
     } catch (error) {
       showNotice({ message: error instanceof Error ? error.message : "无法打开识别校对", tone: "error" });
-    } finally {
-      setAction(null);
-    }
-  }
-
-  async function saveReviewedMeasure(measureNumber: number, events: RecognitionEvent[], timeSignature: { numerator: number; denominator: number }) {
-    if (!project) return;
-    setAction("review-save");
-    try {
-      const diagnostics = await api.updateRecognitionMeasure(project.id, measureNumber, events, timeSignature);
-      setRecognition(diagnostics);
-      const refreshed = await refresh();
-      setScoreRevision(refreshed.updated_at);
-      showNotice({ message: `第 ${measureNumber} 小节已保存并重新生成乐谱`, tone: "success" });
-    } catch (error) {
-      showNotice({ message: error instanceof Error ? error.message : "小节保存失败", tone: "error" });
-    } finally {
-      setAction(null);
-    }
-  }
-
-  async function retryReviewedMeasure(measureNumber: number): Promise<RecognitionMeasure> {
-    if (!project) throw new Error("项目尚未载入");
-    setAction("review-recognize");
-    try {
-      const proposal = await api.retryRecognitionMeasure(project.id, measureNumber);
-      showNotice({ message: `第 ${measureNumber} 小节已重新识别为草稿，请对照确认后保存`, tone: "success" });
-      return proposal;
-    } catch (error) {
-      showNotice({ message: error instanceof Error ? error.message : "小节重新识别失败", tone: "error" });
-      throw error;
-    } finally {
-      setAction(null);
-    }
-  }
-
-  async function appendReviewedMeasure(): Promise<RecognitionDiagnostics> {
-    if (!project) throw new Error("项目尚未载入");
-    setAction("review-append");
-    try {
-      const diagnostics = await api.appendRecognitionMeasure(project.id);
-      setRecognition(diagnostics);
-      const refreshed = await refresh();
-      setScoreRevision(refreshed.updated_at);
-      showNotice({ message: `已添加第 ${diagnostics.summary.end_measure} 小节`, tone: "success" });
-      return diagnostics;
-    } catch (error) {
-      showNotice({ message: error instanceof Error ? error.message : "添加小节失败", tone: "error" });
-      throw error;
     } finally {
       setAction(null);
     }
@@ -715,6 +653,44 @@ function ProjectWorkspace({
     }
   }
 
+  async function retryScoreMeasure(measureNumber: number) {
+    if (!project) return;
+    setAction("review-recognize");
+    try {
+      const proposal = await api.retryRecognitionMeasure(project.id, measureNumber);
+      const diagnostics = await api.updateRecognitionMeasure(
+        project.id,
+        measureNumber,
+        proposal.events,
+        proposal.time_signature
+      );
+      setRecognition(diagnostics);
+      const refreshed = await refresh();
+      setScoreRevision(refreshed.updated_at);
+      showNotice({ message: `第 ${measureNumber} 小节已重新识别并回到可播放谱面`, tone: "success" });
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "小节重新识别失败", tone: "error" });
+    } finally {
+      setAction(null);
+    }
+  }
+
+  async function appendScoreMeasure() {
+    if (!project) return;
+    setAction("review-append");
+    try {
+      const diagnostics = await api.appendRecognitionMeasure(project.id);
+      setRecognition(diagnostics);
+      const refreshed = await refresh();
+      setScoreRevision(refreshed.updated_at);
+      showNotice({ message: `已在谱面末尾添加第 ${diagnostics.summary.end_measure} 小节`, tone: "success" });
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "添加小节失败", tone: "error" });
+    } finally {
+      setAction(null);
+    }
+  }
+
   async function saveEditedScore(file: File) {
     if (!project) return;
     setAction("score-save");
@@ -732,11 +708,7 @@ function ProjectWorkspace({
   }
 
   function confirmDiscardScoreChanges() {
-    return !(scoreDirty || reviewDirty) || window.confirm("谱面还有未保存修改。确定离开并丢弃这些修改吗？");
-  }
-
-  function closeReview() {
-    if (!reviewDirty || window.confirm("六线谱编辑器还有未保存修改。确定关闭并丢弃这些修改吗？")) setReviewOpen(false);
+    return !scoreDirty || window.confirm("谱面还有未保存修改。确定离开并丢弃这些修改吗？");
   }
 
   function changeView(next: "video" | "frames" | "images" | "score") {
@@ -744,8 +716,6 @@ function ProjectWorkspace({
     if (!confirmDiscardScoreChanges()) return;
     if (next !== "score") {
       setScoreDirty(false);
-      setReviewDirty(false);
-      setReviewOpen(false);
     }
     setViewMode(next);
   }
@@ -768,8 +738,6 @@ function ProjectWorkspace({
     void run("score", async () => {
       await api.uploadScore(projectId, file);
       setScoreDirty(false);
-      setReviewDirty(false);
-      setReviewOpen(false);
       setRecognition(null);
       setViewMode("score");
     }, "结构化乐谱已载入");
@@ -837,7 +805,7 @@ function ProjectWorkspace({
         <button type="button" className="back-button" onClick={leaveProject}><ArrowLeft size={17} /> 曲库</button>
         <div className="workspace-title">
           <input value={title} onChange={(event) => setTitle(event.target.value)} onBlur={saveTitle} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label="项目名称" />
-          <span><Save size={12} /> {action === "rename" ? "正在保存" : scoreDirty ? "谱面有修改 · Ctrl/⌘S 保存" : reviewDirty ? "六线谱有未保存修改" : "项目已保存到私人曲库"}</span>
+          <span><Save size={12} /> {action === "rename" ? "正在保存" : scoreDirty ? "谱面有修改 · Ctrl/⌘S 保存" : "项目已保存到私人曲库"}</span>
         </div>
         <div className={`workspace-status ${project.status}`}><i />{STATUS_LABELS[project.status] ?? project.status}</div>
       </header>
@@ -913,7 +881,7 @@ function ProjectWorkspace({
                 ))}
               </div>
             ) : viewMode === "score" && project.score_file_url ? (
-              <div className={`unified-score-studio ${reviewOpen ? "review-open" : ""}`}>
+              <div className="unified-score-studio">
                 {canReview && !recognition ? (
                   <div className="score-loading">
                     {recognitionLoadError ? (
@@ -932,39 +900,15 @@ function ProjectWorkspace({
                     syncPoints={project.sync_points}
                     videoFrames={project.video_frames}
                     recognition={recognition}
-                    reviewOpen={reviewOpen}
-                    editingDisabled={reviewOpen || action === "recognize" || action === "review-recognize" || project.status === "recognizing"}
-                    onToggleReview={() => {
-                      if (scoreDirty && !reviewOpen) showNotice({ message: "请先保存谱面修改，再打开精确网格校对", tone: "error" });
-                      else if (reviewOpen) closeReview();
-                      else void openReviewAt();
-                    }}
-                    onFocusMeasure={(nextMeasure) => {
-                      if (!reviewOpen || !reviewDirty) setReviewMeasure(nextMeasure);
-                    }}
+                    editingDisabled={["recognize", "review-recognize", "review-append"].includes(action ?? "") || project.status === "recognizing"}
+                    onFocusMeasure={() => undefined}
                     onDirtyChange={setScoreDirty}
                     onSaveScore={saveEditedScore}
                     onSaveRecognition={saveRecognitionChanges}
+                    onRetryRecognition={retryScoreMeasure}
+                    onAppendMeasure={appendScoreMeasure}
                     />
                   </Suspense>
-                )}
-                {reviewOpen && recognition && (
-                  <aside className="inline-review-dock" aria-label="六线谱逐弦编辑器">
-                    <header><div><span>TAB EDITOR</span><strong>六线谱逐弦编辑器</strong></div><button type="button" onClick={closeReview} aria-label="关闭六线谱编辑器">×</button></header>
-                    <ScoreReviewPanel
-                      embedded
-                      project={project}
-                      diagnostics={recognition}
-                      measureNumber={reviewMeasure}
-                      busy={action === "review-save" || action === "review-recognize" || action === "review-append"}
-                      retrying={action === "review-recognize"}
-                      onMeasureChange={setReviewMeasure}
-                      onDirtyChange={setReviewDirty}
-                      onSave={saveReviewedMeasure}
-                      onRetryRecognition={retryReviewedMeasure}
-                      onAppendMeasure={appendReviewedMeasure}
-                    />
-                  </aside>
                 )}
               </div>
             ) : viewMode === "images" && project.score_images.length ? (
@@ -988,15 +932,15 @@ function ProjectWorkspace({
               </label>
             )}
           </div>
-          {((action && action !== "rename" && action !== "rights") || ["downloading", "analyzing", "recognizing"].includes(project.status) || project.audio_analysis?.status === "pending") && <div className="stage-progress"><LoaderCircle size={15} className="spin" /> {action === "review-recognize" ? `正在重新识别第 ${reviewMeasure} 小节…` : project.status_message || "正在处理，请不要关闭页面"}</div>}
+          {((action && action !== "rename" && action !== "rights") || ["downloading", "analyzing", "recognizing"].includes(project.status) || project.audio_analysis?.status === "pending") && <div className="stage-progress"><LoaderCircle size={15} className="spin" /> {project.status_message || "正在处理，请不要关闭页面"}</div>}
         </section>
 
         <aside className="inspector">
           {isManualTab ? (
             <section className="inspector-section source-section manual-source-section">
               <div className="inspector-heading"><span><FileMusic size={16} /></span><div><h3>手动六线谱</h3><p>标准调弦 · 4/4 拍 · 十六分网格</p></div></div>
-              <p className="inspector-copy">这份谱不依赖视频。打开编辑器后，上下键选择 1～6 弦，左右键逐格移动，再输入 0～36 品。</p>
-              <button className="secondary-button full" type="button" onClick={() => void openReviewAt()}><PencilLine size={15} /> 打开六线谱编辑器</button>
+              <p className="inspector-copy">这份谱不依赖视频。直接在上方谱面的音符或空拍上点击，上下键换弦、左右键移动，再输入 0～36 品。</p>
+              <button className="secondary-button full" type="button" onClick={() => void openReviewAt()}><PencilLine size={15} /> 在可播放谱面中打谱</button>
             </section>
           ) : (
           <section className="inspector-section source-section">
@@ -1034,7 +978,7 @@ function ProjectWorkspace({
             <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>{isManualTab ? "乐谱结构" : "乐谱识别"}</h3><p>{isManualTab ? "可保存的六线谱事件模型" : project.video_frames.length ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
             <p className="inspector-copy">{isManualTab ? "同一时间格的六根弦可以组成和弦；删除只影响当前弦。音符、时值和技巧保存后会重建可播放的 MusicXML。" : project.video_frames.length ? "从原始切片识别弦号、品位和八分音符网格，按小节号去重合成完整 PDF；校对器可用数字键改品位，并添加连音、滑音、击勾弦、推弦等技巧。" : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
             {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 覆盖置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}{typeof project.recognition_summary.glyph_coverage === "number" ? ` · 数字覆盖 ${Math.round(project.recognition_summary.glyph_coverage * 100)}%` : ""}</p>}
-            {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty || reviewDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || reviewDirty || action === "recognize" || project.status === "recognizing" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
+            {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || action === "recognize" || project.status === "recognizing" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
               {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
               {project.video_frames.length ? (capabilities.tab_ocr ? "识别视频六线 TAB" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}
             </button>}

@@ -10,8 +10,10 @@ import {
   LoaderCircle,
   Pause,
   PencilLine,
+  Plus,
   Play,
   Save,
+  ScanLine,
   Undo2,
   Video
 } from "lucide-react";
@@ -38,13 +40,13 @@ type Props = {
   syncPoints: SyncPoint[];
   videoFrames: VideoFrame[];
   recognition: RecognitionDiagnostics | null;
-  reviewOpen: boolean;
   editingDisabled: boolean;
-  onToggleReview: () => void;
   onFocusMeasure: (measure: number) => void;
   onDirtyChange: (dirty: boolean) => void;
   onSaveScore: (file: File) => Promise<void>;
   onSaveRecognition: (changes: RecognitionChange[]) => Promise<void>;
+  onRetryRecognition: (measure: number) => Promise<void>;
+  onAppendMeasure: () => Promise<void>;
 };
 
 type ExportKind = "gp" | "midi" | "wav";
@@ -63,6 +65,15 @@ type SelectionMarker = {
   width: number;
   height: number;
 };
+
+type ScoreCursor = {
+  beat: alphaTab.model.Beat;
+  onset: number;
+  string: number;
+  marker: SelectionMarker;
+};
+
+type MeasureMarker = SelectionMarker & { measure: number };
 
 type NoteState = {
   note: alphaTab.model.Note;
@@ -600,13 +611,13 @@ export function AlphaTabPlayer({
   syncPoints,
   videoFrames,
   recognition,
-  reviewOpen,
   editingDisabled,
-  onToggleReview,
   onFocusMeasure,
   onDirtyChange,
   onSaveScore,
-  onSaveRecognition
+  onSaveRecognition,
+  onRetryRecognition,
+  onAppendMeasure
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -616,6 +627,8 @@ export function AlphaTabPlayer({
   const midiRef = useRef<alphaTab.midi.MidiFile | null>(null);
   const selectedNotesRef = useRef<alphaTab.model.Note[]>([]);
   const selectionAnchorRef = useRef<alphaTab.model.Note | null>(null);
+  const scoreCursorRef = useRef<ScoreCursor | null>(null);
+  const entryDurationRef = useRef<number>(1);
   const dragBaseSelectionRef = useRef<alphaTab.model.Note[]>([]);
   const pointerModifiersRef = useRef({ additive: false, range: false });
   const referenceModeRef = useRef<ReferenceMode | null>(null);
@@ -649,6 +662,9 @@ export function AlphaTabPlayer({
   const [editStatus, setEditStatus] = useState("单击音符开始编辑");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [selectionMarkers, setSelectionMarkers] = useState<SelectionMarker[]>([]);
+  const [scoreCursor, setScoreCursor] = useState<ScoreCursor | null>(null);
+  const [measureMarkers, setMeasureMarkers] = useState<MeasureMarker[]>([]);
+  const [entryDuration, setEntryDurationState] = useState(1);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -689,6 +705,7 @@ export function AlphaTabPlayer({
     if (!editingDisabled) return;
     setCommandPaletteOpen(false);
     setSelection([]);
+    clearScoreCursor();
     setEditStatus("当前谱面暂时只读；仍可播放和导出");
   }, [editingDisabled]);
 
@@ -749,6 +766,88 @@ export function AlphaTabPlayer({
       markers.push({ id: note.id, x: host.offsetLeft + bounds.x - 6, y: host.offsetTop + bounds.y - 5, width: Math.max(18, bounds.w + 12), height: Math.max(18, bounds.h + 10) });
     }
     setSelectionMarkers(markers);
+
+    const draft = recognitionDraftRef.current;
+    const firstMeasure = recognitionRef.current?.summary.start_measure ?? 1;
+    if (!draft) setMeasureMarkers([]);
+    else setMeasureMarkers(draft.flatMap((measure) => {
+      const masterBounds = lookup.findMasterBarByIndex(measure.number - firstMeasure);
+      if (!masterBounds) return [];
+      const capacity = (measure.time_signature?.numerator ?? 4) * 8 / (measure.time_signature?.denominator ?? 4);
+      const events = [...measure.events].sort((left, right) => left.onset_eighths - right.onset_eighths);
+      let cursor = 0;
+      let invalid = false;
+      for (const event of events) {
+        if (event.onset_eighths > cursor + 1e-9 || event.onset_eighths < cursor - 1e-9 || event.duration_eighths <= 0) invalid = true;
+        cursor = Math.max(cursor, event.onset_eighths + event.duration_eighths);
+      }
+      invalid ||= Math.abs(cursor - capacity) > 1e-9;
+      if (!invalid) return [];
+      const bounds = masterBounds.lineAlignedBounds ?? masterBounds.realBounds;
+      return [{
+        id: measure.number,
+        measure: measure.number,
+        x: host.offsetLeft + bounds.x,
+        y: host.offsetTop + bounds.y,
+        width: bounds.w,
+        height: bounds.h
+      }];
+    }));
+  }
+
+  function clearScoreCursor() {
+    scoreCursorRef.current = null;
+    setScoreCursor(null);
+  }
+
+  function setEntryDuration(value: number) {
+    entryDurationRef.current = value;
+    setEntryDurationState(value);
+    if (scoreCursorRef.current) setEditStatus(`新音时值 ${directDurationLabel(value)} · 输入 0–9 写入当前弦`);
+  }
+
+  function selectScoreCellFromPointer(event: PointerEvent) {
+    if (editingDisabledRef.current || savingRef.current) return;
+    const api = apiRef.current;
+    const host = hostRef.current;
+    const lookup = api?.renderer.boundsLookup;
+    if (!api || !host || !lookup) return;
+    const hostBounds = host.getBoundingClientRect();
+    const x = event.clientX - hostBounds.left;
+    const y = event.clientY - hostBounds.top;
+    const beat = lookup.getBeatAtPos(x, y);
+    if (!beat || lookup.getNoteAtPos(beat, x, y)) return;
+    const beatBounds = lookup.findBeat(beat);
+    if (!beatBounds) return;
+    const barBounds = beatBounds.barBounds;
+    const stringCount = barBounds.bar.staff.tuning.length || 6;
+    if (!stringCount) return;
+    const staffBounds = barBounds.visualBounds.h > 0 ? barBounds.visualBounds : barBounds.realBounds;
+    const relativeY = Math.max(0, Math.min(0.999, (y - staffBounds.y) / Math.max(1, staffBounds.h)));
+    const visualString = Math.max(1, Math.min(stringCount, Math.floor(relativeY * stringCount) + 1));
+    const alphaString = stringCount + 1 - visualString;
+    const beatStart = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+    const duration = beatDurationEighths(beat);
+    const relativeX = beat.isRest
+      ? Math.max(0, Math.min(0.999, (x - beatBounds.realBounds.x) / Math.max(1, beatBounds.realBounds.w)))
+      : 0;
+    const onset = Math.round((beatStart + Math.floor(relativeX * duration / 0.5) * 0.5) * 2) / 2;
+    const positionRatio = duration > 0 ? (onset - beatStart) / duration : 0;
+    const marker: SelectionMarker = {
+      id: -1,
+      x: host.offsetLeft + beatBounds.realBounds.x + beatBounds.realBounds.w * positionRatio - 9,
+      y: host.offsetTop + staffBounds.y + staffBounds.h * ((visualString - 0.5) / stringCount) - 9,
+      width: 18,
+      height: 18
+    };
+    const cursor = { beat, onset, string: alphaString, marker };
+    scoreCursorRef.current = cursor;
+    setScoreCursor(cursor);
+    setSelection([]);
+    const measure = (recognitionRef.current?.summary.start_measure ?? 1) + beat.voice.bar.masterBar.index;
+    setFocusedMeasure(measure);
+    onFocusMeasureRef.current(measure);
+    setEditStatus(`第 ${measure} 小节 · ${visualString} 弦 · 空拍 ${directDurationLabel(entryDurationRef.current)} · 输入品位`);
   }
 
   function setSelection(notes: alphaTab.model.Note[], anchor = notes.at(-1) ?? null) {
@@ -782,6 +881,7 @@ export function AlphaTabPlayer({
 
   function handleNotePointerDown(note: alphaTab.model.Note) {
     if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
+    clearScoreCursor();
     const current = selectedNotesRef.current;
     if (pointerModifiersRef.current.range && selectionAnchorRef.current) {
       setSelection(noteRange(selectionAnchorRef.current, note), selectionAnchorRef.current);
@@ -848,6 +948,7 @@ export function AlphaTabPlayer({
     const capturePointerModifiers = (event: PointerEvent) => {
       host.focus({ preventScroll: true });
       pointerModifiersRef.current = { additive: event.ctrlKey || event.metaKey, range: event.shiftKey };
+      selectScoreCellFromPointer(event);
     };
     host.addEventListener("pointerdown", capturePointerModifiers, true);
     const attachEngine = () => {
@@ -1204,10 +1305,228 @@ export function AlphaTabPlayer({
     closeCommandPalette();
   }
 
+  function recognitionMeasureForBeat(beat: alphaTab.model.Beat) {
+    const measures = recognitionDraftRef.current;
+    if (!measures || !recognitionRef.current) return null;
+    const number = (recognitionRef.current.summary.start_measure ?? 1) + beat.voice.bar.masterBar.index;
+    return measures.find((candidate) => candidate.number === number) ?? null;
+  }
+
+  function recognitionEventsWithInsertedNote(
+    measure: RecognitionMeasure,
+    onset: number,
+    duration: number,
+    string: number,
+    fret: number
+  ) {
+    const end = onset + duration;
+    const exact = measure.events.find((event) => !event.rest && event.onset_eighths === onset);
+    if (exact) {
+      if (exact.notes.some((note) => note.string === string)) return null;
+      return measure.events.map((event) => event === exact
+        ? { ...event, notes: [...event.notes, { string, fret }].sort((left, right) => left.string - right.string) }
+        : event);
+    }
+    const events: RecognitionEvent[] = [];
+    for (const event of measure.events) {
+      const eventEnd = event.onset_eighths + event.duration_eighths;
+      const overlaps = event.onset_eighths < end - 1e-9 && eventEnd > onset + 1e-9;
+      if (!overlaps) {
+        events.push(event);
+        continue;
+      }
+      if (!event.rest) return null;
+      const leading = onset - event.onset_eighths;
+      const trailing = eventEnd - end;
+      if (leading > 1e-9) events.push({ onset_eighths: event.onset_eighths, duration_eighths: leading, notes: [], rest: true });
+      if (trailing > 1e-9) events.push({ onset_eighths: end, duration_eighths: trailing, notes: [], rest: true });
+    }
+    events.push({ onset_eighths: onset, duration_eighths: duration, notes: [{ string, fret }] });
+    return events.sort((left, right) => left.onset_eighths - right.onset_eighths);
+  }
+
+  function newBeatForEdit(voice: alphaTab.model.Voice, entry: HistoryEntry, index: number, duration: alphaTab.model.Duration, dots = 0) {
+    const beat = new alphaTab.model.Beat();
+    beat.voice = voice;
+    beat.duration = duration;
+    beat.dots = dots;
+    entry.beatStates.push({ beat, voice, index, present: false, duration: beat.duration, dots: beat.dots });
+    return beat;
+  }
+
+  function insertFretAtScoreCursor(digit: string) {
+    const cursor = scoreCursorRef.current;
+    if (!cursor) return false;
+    const beat = cursor.beat;
+    const measure = recognitionMeasureForBeat(beat);
+    if (!measure) {
+      setEditStatus("当前空拍没有可保存的识别草稿");
+      return true;
+    }
+    const fret = Number(digit);
+    const voice = beat.voice;
+    const stringCount = voice.bar.staff.tuning.length || 6;
+    const recognitionStringNumber = stringCount + 1 - cursor.string;
+    const beatStart = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+    const duration = beat.isRest ? entryDurationRef.current : beatDurationEighths(beat);
+    const beatEnd = beatStart + beatDurationEighths(beat);
+    if (cursor.onset + duration > beatEnd + 1e-9) {
+      setEditStatus(`当前休止拍只剩 ${(beatEnd - cursor.onset).toFixed(1)} 个八分单位，无法写入 ${directDurationLabel(duration)}`);
+      return true;
+    }
+    const nextEvents = recognitionEventsWithInsertedNote(measure, cursor.onset, duration, recognitionStringNumber, fret);
+    if (!nextEvents) {
+      setEditStatus("这个位置与已有音符重叠，先缩短时值或选择其他拍位");
+      return true;
+    }
+    const entry = historyEntry("添加音符", []);
+    let noteBeat = beat;
+    if (beat.isRest) {
+      const originalIndex = voice.beats.indexOf(beat);
+      if (originalIndex < 0) return true;
+      rememberBeat(entry, beat);
+      voice.beats.splice(originalIndex, 1);
+      const leading = Math.max(0, cursor.onset - beatStart);
+      const trailing = Math.max(0, beatEnd - cursor.onset - duration);
+      const replacements: alphaTab.model.Beat[] = [];
+      for (const shape of restShapes(leading)) replacements.push(newBeatForEdit(voice, entry, originalIndex + replacements.length, shape.duration, shape.dots));
+      noteBeat = newBeatForEdit(voice, entry, originalIndex + replacements.length, alphaDuration(duration));
+      replacements.push(noteBeat);
+      for (const shape of restShapes(trailing)) replacements.push(newBeatForEdit(voice, entry, originalIndex + replacements.length, shape.duration, shape.dots));
+      voice.beats.splice(originalIndex, 0, ...replacements);
+    } else if (beat.getNoteOnString(cursor.string)) {
+      setEditStatus("当前弦位已经有音符；可直接选中后输入新品位");
+      return true;
+    }
+    const note = new alphaTab.model.Note();
+    note.beat = noteBeat;
+    note.string = cursor.string;
+    note.fret = fret;
+    entry.states.push(captureNoteState(note));
+    noteBeat.addNote(note);
+    measure.events = nextEvents;
+    dirtyRecognitionMeasuresRef.current.add(measure.number);
+    clearScoreCursor();
+    commitEdit(`已在第 ${measure.number} 小节 ${recognitionStringNumber} 弦写入 ${fret} 品`, entry, [note]);
+    setSelection([note], note);
+    digitBufferRef.current = { value: digit, time: Date.now() };
+    digitHistoryEntryRef.current = entry;
+    return true;
+  }
+
+  function cursorAt(beat: alphaTab.model.Beat, onset: number, string: number) {
+    const api = apiRef.current;
+    const host = hostRef.current;
+    const bounds = api?.renderer.boundsLookup?.findBeat(beat);
+    if (!api || !host || !bounds) return null;
+    const staffBounds = bounds.barBounds.visualBounds.h > 0 ? bounds.barBounds.visualBounds : bounds.barBounds.realBounds;
+    const stringCount = beat.voice.bar.staff.tuning.length || 6;
+    const visualString = stringCount + 1 - string;
+    const start = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+    const ratio = Math.max(0, Math.min(1, (onset - start) / Math.max(0.5, beatDurationEighths(beat))));
+    return {
+      beat,
+      onset,
+      string,
+      marker: {
+        id: -1,
+        x: host.offsetLeft + bounds.realBounds.x + bounds.realBounds.w * ratio - 9,
+        y: host.offsetTop + staffBounds.y + staffBounds.h * ((visualString - 0.5) / stringCount) - 9,
+        width: 18,
+        height: 18
+      }
+    } satisfies ScoreCursor;
+  }
+
+  function moveScoreCursor(horizontal: number, vertical: number) {
+    const current = scoreCursorRef.current;
+    if (!current) return;
+    const stringCount = current.beat.voice.bar.staff.tuning.length || 6;
+    let string = Math.max(1, Math.min(stringCount, current.string - vertical));
+    let beat = current.beat;
+    let onset = current.onset;
+    if (horizontal) {
+      const targetOnset = onset + horizontal * entryDurationRef.current;
+      const beatStart = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+      const beatEnd = beatStart + beatDurationEighths(beat);
+      if (targetOnset >= beatStart && targetOnset < beatEnd) onset = targetOnset;
+      else {
+        const targetBeat = horizontal > 0 ? beat.nextBeat : beat.previousBeat;
+        if (!targetBeat) return setEditStatus("已经到达谱面边界");
+        beat = targetBeat;
+        const targetStart = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+        onset = horizontal > 0 ? targetStart : Math.max(targetStart, targetStart + beatDurationEighths(beat) - entryDurationRef.current);
+      }
+    }
+    const next = cursorAt(beat, onset, string);
+    if (!next) return;
+    scoreCursorRef.current = next;
+    setScoreCursor(next);
+    const visualString = stringCount + 1 - string;
+    setEditStatus(`${visualString} 弦 · 空拍 ${directDurationLabel(entryDurationRef.current)} · 输入品位或 Enter 写入休止`);
+  }
+
+  function selectCursorString(visualString: number) {
+    const current = scoreCursorRef.current;
+    if (!current) return;
+    const stringCount = current.beat.voice.bar.staff.tuning.length || 6;
+    const next = cursorAt(current.beat, current.onset, stringCount + 1 - visualString);
+    if (!next) return;
+    scoreCursorRef.current = next;
+    setScoreCursor(next);
+    setEditStatus(`${visualString} 弦 · 空拍 ${directDurationLabel(entryDurationRef.current)} · 输入品位`);
+  }
+
+  function commitRestAtScoreCursor() {
+    const cursor = scoreCursorRef.current;
+    if (!cursor) return false;
+    const beat = cursor.beat;
+    if (!beat.isRest) return false;
+    const measure = recognitionMeasureForBeat(beat);
+    if (!measure) return true;
+    const duration = entryDurationRef.current;
+    const beatStart = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+    const beatEnd = beatStart + beatDurationEighths(beat);
+    const end = cursor.onset + duration;
+    if (end > beatEnd + 1e-9) {
+      setEditStatus("当前空拍剩余时值不足，先缩短新音时值");
+      return true;
+    }
+    const events: RecognitionEvent[] = [];
+    for (const event of measure.events) {
+      const eventEnd = event.onset_eighths + event.duration_eighths;
+      const overlaps = event.onset_eighths < end - 1e-9 && eventEnd > cursor.onset + 1e-9;
+      if (!overlaps) { events.push(event); continue; }
+      if (!event.rest) {
+        setEditStatus("这个位置已经有音符，不能写入休止");
+        return true;
+      }
+      if (event.onset_eighths < cursor.onset) events.push({ onset_eighths: event.onset_eighths, duration_eighths: cursor.onset - event.onset_eighths, notes: [], rest: true });
+      if (eventEnd > end) events.push({ onset_eighths: end, duration_eighths: eventEnd - end, notes: [], rest: true });
+    }
+    events.push({ onset_eighths: cursor.onset, duration_eighths: duration, notes: [], rest: true });
+    const entry = historyEntry("写入休止", []);
+    const voice = beat.voice;
+    const originalIndex = voice.beats.indexOf(beat);
+    rememberBeat(entry, beat);
+    voice.beats.splice(originalIndex, 1);
+    const replacements: alphaTab.model.Beat[] = [];
+    for (const shape of restShapes(cursor.onset - beatStart)) replacements.push(newBeatForEdit(voice, entry, originalIndex + replacements.length, shape.duration, shape.dots));
+    replacements.push(newBeatForEdit(voice, entry, originalIndex + replacements.length, alphaDuration(duration)));
+    for (const shape of restShapes(beatEnd - end)) replacements.push(newBeatForEdit(voice, entry, originalIndex + replacements.length, shape.duration, shape.dots));
+    voice.beats.splice(originalIndex, 0, ...replacements);
+    measure.events = events.sort((left, right) => left.onset_eighths - right.onset_eighths);
+    dirtyRecognitionMeasuresRef.current.add(measure.number);
+    clearScoreCursor();
+    commitEdit(`第 ${measure.number} 小节休止已实体化`, entry, []);
+    return true;
+  }
+
   function writeFretDigit(digit: string) {
     if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
+    if (insertFretAtScoreCursor(digit)) return;
     const selected = selectedNotesRef.current.filter((note) => note.isStringed);
-    if (!selected.length) return setEditStatus("所选音符没有可编辑的品位");
+    if (!selected.length) return setEditStatus("请在谱面空拍或已有音符上单击，再输入品位");
     const recognitionTargets = new Map(selected.map((note) => [
       note,
       recognitionDraftRef.current ? recognitionNote(note) : null
@@ -1453,6 +1772,12 @@ export function AlphaTabPlayer({
   }
 
   function adjustSelectedBeatDuration(shorter: boolean) {
+    if (scoreCursorRef.current) {
+      const index = DIRECT_DURATIONS.findIndex((value) => value === entryDurationRef.current);
+      const nextIndex = Math.max(0, Math.min(DIRECT_DURATIONS.length - 1, (index < 0 ? 3 : index) + (shorter ? 1 : -1)));
+      setEntryDuration(DIRECT_DURATIONS[nextIndex]);
+      return;
+    }
     const currentBeat = selectedNotesRef.current[0]?.beat;
     if (!currentBeat) return setEditStatus("请先选择一个或多个音符节拍");
     const current = beatDurationEighths(currentBeat);
@@ -1573,7 +1898,7 @@ export function AlphaTabPlayer({
     const handler = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         if (commandPaletteOpen) closeCommandPalette();
-        else setSelection([]);
+        else { setSelection([]); clearScoreCursor(); }
         return;
       }
       if (event.code === "Space" && !isNativeControlTarget(event.target)) { event.preventDefault(); if (ready) apiRef.current?.playPause(); return; }
@@ -1584,6 +1909,14 @@ export function AlphaTabPlayer({
       if (commandKey && event.key.toLowerCase() === "e") { event.preventDefault(); openCommandPalette(); return; }
       if (commandKey && event.key.toLowerCase() === "s") { event.preventDefault(); void saveChanges(); return; }
       if (commandKey && event.key.toLowerCase() === "z") { event.preventDefault(); undoLastEdit(); return; }
+      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) && scoreCursorRef.current) {
+        event.preventDefault();
+        moveScoreCursor(
+          event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0,
+          event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0
+        );
+        return;
+      }
       if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) { event.preventDefault(); moveNotesAcrossStrings(event.key === "ArrowUp" ? -1 : 1); return; }
       if (!event.altKey && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) && selectedNotesRef.current.length) {
         event.preventDefault();
@@ -1598,6 +1931,7 @@ export function AlphaTabPlayer({
       if (!commandKey && (event.key === "-" || event.key === "_")) { event.preventDefault(); adjustSelectedBeatDuration(false); return; }
       if (event.code === "NumpadDecimal" || event.key === "Decimal" || event.key === ".") { event.preventDefault(); applySelectedDots(commandKey); return; }
       if (/^\d$/.test(event.key)) { event.preventDefault(); writeFretDigit(event.key); return; }
+      if (event.key === "Enter" || event.key.toLowerCase() === "r") { if (commitRestAtScoreCursor()) event.preventDefault(); return; }
       if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteSelectedNotes(); return; }
       const command = EDIT_COMMANDS.find((candidate) => candidate.shortcut.toLowerCase() === event.key.toLowerCase());
       if (command) { event.preventDefault(); applyCommand(command); }
@@ -1701,13 +2035,16 @@ export function AlphaTabPlayer({
   const selectedBeatDots = selectedBeats.length && selectedBeats.every((beat) => beat.dots === selectedBeats[0].dots)
     ? selectedBeats[0].dots
     : null;
+  const cursorStringCount = scoreCursor ? scoreCursor.beat.voice.bar.staff.tuning.length || 6 : 0;
+  const cursorVisualString = scoreCursor ? cursorStringCount + 1 - scoreCursor.string : 0;
+  const activeDuration = scoreCursor ? entryDuration : selectedBeatDuration;
 
   return (
     <div className="alpha-player score-studio">
       <div className="score-studio-commandbar">
         <div className={`selection-readout ${selectedIds.length ? "active" : ""}`}>
           <span>{selectedIds.length ? <Check size={15} /> : <PencilLine size={15} />}</span>
-          <div><strong>{selectedIds.length ? `已选 ${selectedIds.length} 个音` : "直接编辑谱面"}</strong><small role="status" aria-live="polite">{editStatus}</small></div>
+          <div><strong>{selectedIds.length ? `已选 ${selectedIds.length} 个音` : scoreCursor ? `${cursorVisualString} 弦 · 新音 ${directDurationLabel(entryDuration)}` : "谱面即编辑器"}</strong><small role="status" aria-live="polite">{editStatus}</small></div>
         </div>
         <div className="notation-command-strip" aria-label="演奏技巧快捷命令">
           {EDIT_COMMANDS.map((command) => (
@@ -1721,7 +2058,8 @@ export function AlphaTabPlayer({
           <button type="button" disabled={editingDisabled || saving} onClick={openCommandPalette} title="命令面板 Ctrl/⌘E"><Command size={15} /><span>命令</span></button>
           <button type="button" aria-label="打开悬浮视频" disabled={!videoUrl} className={referenceMode === "video" ? "active" : ""} onClick={() => openReference("video")}><Video size={15} /><span>视频</span></button>
           <button type="button" aria-label="打开悬浮原帧" disabled={!referenceImage} className={referenceMode === "image" ? "active" : ""} onClick={() => openReference("image")}><ImageIcon size={15} /><span>原帧</span></button>
-          {recognition && <button type="button" aria-label="打开六线谱逐弦编辑器" className={reviewOpen ? "active" : ""} onClick={onToggleReview}><PencilLine size={15} /><span>六线编辑</span></button>}
+          {recognition && <button type="button" disabled={editingDisabled || saving || dirty} onClick={() => void onRetryRecognition(focusedMeasure)} title={dirty ? "请先保存当前谱面修改" : `重新识别第 ${focusedMeasure} 小节`}><ScanLine size={15} /><span>重识别</span></button>}
+          {recognition && <button type="button" disabled={editingDisabled || saving || dirty} onClick={() => void onAppendMeasure()} title={dirty ? "请先保存当前谱面修改" : "在乐谱末尾添加小节"}><Plus size={15} /><span>加小节</span></button>}
           <button type="button" aria-label={saving ? "正在保存乐谱" : "保存乐谱"} className={dirty ? "save-needed" : ""} disabled={editingDisabled || !dirty || saving} onClick={() => void saveChanges()}><Save size={15} /><span>{saving ? "保存中" : "保存"}</span></button>
           <details className="score-export-menu">
             <summary aria-label="导出乐谱"><Download size={15} /><span>导出</span></summary>
@@ -1741,11 +2079,12 @@ export function AlphaTabPlayer({
           {[3, 4].map((count) => <button type="button" key={count} className={barsPerRow === count ? "active" : ""} onClick={() => setBarsPerRow(count as 3 | 4)} aria-pressed={barsPerRow === count}>{count}</button>)}
         </div>
         <div className="direct-duration-control" aria-label="所选节拍时值">
-          <span>所选时值</span>
-          {DIRECT_DURATIONS.map((duration) => <button type="button" key={duration} className={selectedBeatDuration === duration ? "active" : ""} disabled={editingDisabled || saving || !selectedIds.length} onClick={() => setSelectedBeatDuration(duration)} aria-pressed={selectedBeatDuration === duration}>{directDurationLabel(duration)}</button>)}
+          <span>{scoreCursor ? "新音时值" : "所选时值"}</span>
+          {DIRECT_DURATIONS.map((duration) => <button type="button" key={duration} className={activeDuration === duration ? "active" : ""} disabled={editingDisabled || saving || (!selectedIds.length && !scoreCursor)} onClick={() => scoreCursor ? setEntryDuration(duration) : setSelectedBeatDuration(duration)} aria-pressed={activeDuration === duration}>{directDurationLabel(duration)}</button>)}
           <button type="button" className={`dot-duration-button ${selectedBeatDots ? "active" : ""}`} disabled={editingDisabled || saving || !selectedIds.length} onClick={() => applySelectedDots(false)} aria-pressed={Boolean(selectedBeatDots)} title=". 切换单附点；Ctrl/⌘ + . 设双附点">{selectedBeatDots === 2 ? "··" : "·"} 附点</button>
           <i><kbd>+</kbd>/<kbd>−</kbd> 时值 · 小键盘 <kbd>.</kbd> 附点</i>
         </div>
+        {scoreCursor && <div className="score-string-picker" aria-label="当前编辑弦"><span>弦</span>{Array.from({ length: cursorStringCount }, (_, index) => index + 1).map((string) => <button type="button" key={string} className={cursorVisualString === string ? "active" : ""} onClick={() => selectCursorString(string)}>{string}</button>)}</div>}
       </div>
 
       <div className="studio-keyboard-hint">
@@ -1754,9 +2093,11 @@ export function AlphaTabPlayer({
       </div>
       {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>拖过音符可扩展选区；<kbd>.</kbd> 切换单附点，<kbd>Ctrl/⌘ .</kbd> 设双附点；<kbd>Esc</kbd> 清空；<kbd>Delete</kbd> 删除；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
 
-      <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可选择和编辑的乐谱"} />
+      <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可直接在空拍和音符上编辑的乐谱"} />
       <div className="score-selection-layer" aria-hidden="true">
+        {measureMarkers.map((marker) => <i className="measure-error-marker" key={`measure-${marker.measure}`} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }}><b>{marker.measure}</b></i>)}
         {selectionMarkers.map((marker) => <i key={marker.id} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }} />)}
+        {scoreCursor && <i className="score-cell-cursor" style={{ left: scoreCursor.marker.x, top: scoreCursor.marker.y, width: scoreCursor.marker.width, height: scoreCursor.marker.height }} />}
       </div>
 
       <div className="alpha-controls glass-bar">

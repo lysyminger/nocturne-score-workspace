@@ -67,6 +67,7 @@ type SelectionMarker = {
   y: number;
   width: number;
   height: number;
+  kind?: "cell" | "range";
 };
 
 type ScoreCursor = {
@@ -75,6 +76,15 @@ type ScoreCursor = {
   string: number;
   kind: "string" | "rest";
   marker: SelectionMarker;
+};
+
+type ScoreDragSelection = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  startBeat: alphaTab.model.Beat;
+  endBeat: alphaTab.model.Beat;
+  moved: boolean;
 };
 
 type MeasureMarker = SelectionMarker & { measure: number; used: number; capacity: number };
@@ -390,6 +400,10 @@ function uniqueBeats(notes: alphaTab.model.Note[]) {
   return [...new Map(notes.map((note) => [note.beat.id, note.beat])).values()];
 }
 
+function uniqueBeatList(beats: alphaTab.model.Beat[]) {
+  return [...new Map(beats.map((beat) => [beat.id, beat])).values()];
+}
+
 function beatDurationEighths(beat: alphaTab.model.Beat) {
   const base = beatBaseDurationEighths(beat);
   if (beat.dots === 1) return base * 1.5;
@@ -654,6 +668,8 @@ export function AlphaTabPlayer({
   const entryDurationRef = useRef<number>(1);
   const pointerModifiersRef = useRef({ restart: false });
   const selectionColumnsRef = useRef(false);
+  const selectedColumnBeatsRef = useRef<alphaTab.model.Beat[]>([]);
+  const dragSelectionRef = useRef<ScoreDragSelection | null>(null);
   const referenceModeRef = useRef<ReferenceMode | null>(null);
   const videoSyncEnabledRef = useRef(false);
   const videoSyncAnchorsRef = useRef<VideoSyncAnchor[]>([]);
@@ -685,7 +701,9 @@ export function AlphaTabPlayer({
   const [exportStatus, setExportStatus] = useState("");
   const [editStatus, setEditStatus] = useState("单击音符开始编辑");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [selectedColumnCount, setSelectedColumnCount] = useState(0);
   const [selectionMarkers, setSelectionMarkers] = useState<SelectionMarker[]>([]);
+  const [ghostRestMarkers, setGhostRestMarkers] = useState<SelectionMarker[]>([]);
   const [scoreCursor, setScoreCursor] = useState<ScoreCursor | null>(null);
   const [measureMarkers, setMeasureMarkers] = useState<MeasureMarker[]>([]);
   const [entryDuration, setEntryDurationState] = useState(1);
@@ -859,35 +877,61 @@ export function AlphaTabPlayer({
     } satisfies SelectionMarker;
   }
 
+  function rangeMarkersFor(beats: alphaTab.model.Beat[], lookup: alphaTab.rendering.BoundsLookup, host: HTMLDivElement) {
+    const rows: Array<{ centerY: number; left: number; right: number; top: number; bottom: number }> = [];
+    for (const beat of beats) {
+      const bounds = lookup.findBeat(beat);
+      if (!bounds) continue;
+      const range = beatStringRange(bounds);
+      const centerY = (range.top + range.bottom) / 2;
+      const centerX = beatColumnX(bounds);
+      let row = rows.find((candidate) => Math.abs(candidate.centerY - centerY) < 24);
+      if (!row) {
+        row = { centerY, left: centerX - 11, right: centerX + 11, top: range.top - 8, bottom: range.bottom + 8 };
+        rows.push(row);
+      } else {
+        row.left = Math.min(row.left, centerX - 11);
+        row.right = Math.max(row.right, centerX + 11);
+        row.top = Math.min(row.top, range.top - 8);
+        row.bottom = Math.max(row.bottom, range.bottom + 8);
+      }
+    }
+    return rows.map((row, index) => ({
+      id: -1000 - index,
+      x: host.offsetLeft + row.left,
+      y: host.offsetTop + row.top,
+      width: Math.max(22, row.right - row.left),
+      height: Math.max(22, row.bottom - row.top),
+      kind: "range" as const
+    }));
+  }
+
   function updateSelectionMarkers() {
     const api = apiRef.current;
     const host = hostRef.current;
     const lookup = api?.renderer.boundsLookup;
     if (!api || !host || !lookup) {
       setSelectionMarkers([]);
+      setGhostRestMarkers([]);
       setMeasureMarkers([]);
       return;
     }
     const markers: SelectionMarker[] = [];
     if (selectionColumnsRef.current) {
-      for (const beat of uniqueBeats(selectedNotesRef.current)) {
-        const bounds = lookup.findBeat(beat);
-        if (!bounds) continue;
-        const range = beatStringRange(bounds);
-        markers.push({
-          id: beat.id,
-          x: host.offsetLeft + beatColumnX(bounds) - 10,
-          y: host.offsetTop + range.top - 7,
-          width: 20,
-          height: Math.max(18, range.bottom - range.top + 14)
-        });
-      }
+      markers.push(...rangeMarkersFor(selectedColumnBeatsRef.current, lookup, host));
     } else for (const note of selectedNotesRef.current) {
       const bounds = lookup.findBeat(note.beat)?.notes?.find((candidate) => candidate.note.id === note.id)?.noteHeadBounds;
       if (!bounds) continue;
       markers.push({ id: note.id, x: host.offsetLeft + bounds.x - 6, y: host.offsetTop + bounds.y - 5, width: Math.max(18, bounds.w + 12), height: Math.max(18, bounds.h + 10) });
     }
     setSelectionMarkers(markers);
+    setGhostRestMarkers([...editableGhostBeatsRef.current].flatMap((beat, index) => {
+      const bounds = lookup.findBeat(beat);
+      if (!bounds) return [];
+      const stringCount = beat.voice.bar.staff.tuning.length || 6;
+      const marker = cursorMarkerFor(bounds, Math.max(1, Math.ceil(stringCount / 2)), "rest");
+      return marker ? [{ ...marker, id: -2000 - index }] : [];
+    }));
 
     const currentCursor = scoreCursorRef.current;
     if (currentCursor) {
@@ -980,12 +1024,15 @@ export function AlphaTabPlayer({
     } else setEditStatus(`第 ${measure} 小节 · ${visualString} 弦 · 灰色预览 ${directDurationLabel(entryDurationRef.current)} · 输入品位`);
   }
 
-  function setSelection(notes: alphaTab.model.Note[], anchor = notes.at(-1) ?? null, asColumns = false) {
+  function setSelection(notes: alphaTab.model.Note[], anchor = notes.at(-1) ?? null, asColumns = false, columnBeats: alphaTab.model.Beat[] = []) {
     const next = uniqueNotes(notes);
+    const nextColumns = asColumns ? uniqueBeatList(columnBeats.length ? columnBeats : uniqueBeats(next)) : [];
     selectionColumnsRef.current = asColumns;
+    selectedColumnBeatsRef.current = nextColumns;
     selectedNotesRef.current = next;
     selectionAnchorRef.current = anchor;
     setSelectedIds(next.map((note) => note.id));
+    setSelectedColumnCount(nextColumns.length);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
     if (anchor) {
@@ -993,19 +1040,23 @@ export function AlphaTabPlayer({
       setFocusedMeasure(measure);
       onFocusMeasureRef.current(measure);
     }
-    setEditStatus(next.length ? `已选 ${next.length} 个音 · 可直接输入品位或技巧快捷键` : "选择已清空");
+    setEditStatus(next.length
+      ? `已选 ${next.length} 个音${nextColumns.length ? ` · ${nextColumns.length} 个连续节拍列` : ""} · 可直接输入品位或技巧快捷键`
+      : nextColumns.length ? `已选 ${nextColumns.length} 个连续节拍列` : "选择已清空");
     window.requestAnimationFrame(updateSelectionMarkers);
   }
 
-  function beatRangeNotes(start: alphaTab.model.Note, end: alphaTab.model.Note) {
-    const score = scoreRef.current;
-    if (!score) return [end];
-    if (start.beat.voice.index !== end.beat.voice.index || start.beat.voice.bar.staff !== end.beat.voice.bar.staff) return [end];
-    const beats = start.beat.voice.bar.staff.bars.flatMap((bar) => (bar.voices[start.beat.voice.index] ?? bar.voices[0])?.beats ?? []);
-    const startIndex = beats.indexOf(start.beat);
-    const endIndex = beats.indexOf(end.beat);
+  function beatRangeBeats(start: alphaTab.model.Beat, end: alphaTab.model.Beat) {
+    if (start.voice.index !== end.voice.index || start.voice.bar.staff !== end.voice.bar.staff) return [end];
+    const beats = start.voice.bar.staff.bars.flatMap((bar) => (bar.voices[start.voice.index] ?? bar.voices[0])?.beats ?? []);
+    const startIndex = beats.indexOf(start);
+    const endIndex = beats.indexOf(end);
     if (startIndex < 0 || endIndex < 0) return [end];
-    return beats.slice(Math.min(startIndex, endIndex), Math.max(startIndex, endIndex) + 1).flatMap((beat) => beat.notes);
+    return beats.slice(Math.min(startIndex, endIndex), Math.max(startIndex, endIndex) + 1);
+  }
+
+  function beatRangeNotes(start: alphaTab.model.Note, end: alphaTab.model.Note) {
+    return beatRangeBeats(start.beat, end.beat).flatMap((beat) => beat.notes);
   }
 
   function seekPlaybackToBeat(beat: alphaTab.model.Beat) {
@@ -1028,9 +1079,10 @@ export function AlphaTabPlayer({
       setSelection([note], note);
       return;
     }
-    const range = beatRangeNotes(anchor, note);
-    setSelection(range, anchor, true);
-    setEditStatus(`连续选择 ${uniqueBeats(range).length} 个节拍列 · 共 ${range.length} 个音 · Backspace/Delete 删除`);
+    const columns = beatRangeBeats(anchor.beat, note.beat);
+    const range = columns.flatMap((beat) => beat.notes);
+    setSelection(range, anchor, true, columns);
+    setEditStatus(`连续选择 ${columns.length} 个节拍列 · 共 ${range.length} 个音 · Backspace/Delete 删除`);
   }
 
   function setPlaybackState(value: boolean) {
@@ -1054,8 +1106,12 @@ export function AlphaTabPlayer({
     scoreRef.current = null;
     midiRef.current = null;
     editableGhostBeatsRef.current.clear();
+    setGhostRestMarkers([]);
     selectedNotesRef.current = [];
+    selectedColumnBeatsRef.current = [];
+    dragSelectionRef.current = null;
     setSelectedIds([]);
+    setSelectedColumnCount(0);
     setScoreReady(false);
     setReady(false);
     setEngineMode(null);
@@ -1096,11 +1152,70 @@ export function AlphaTabPlayer({
         y: Math.max(0, Math.min(host.offsetHeight, event.clientY - bounds.top))
       };
     };
+    const beatAtPoint = (point: { x: number; y: number }) => {
+      const lookup = api.renderer.boundsLookup;
+      if (!lookup) return null;
+      const direct = lookup.getBeatAtPos(point.x, point.y);
+      if (direct) return direct;
+      const staff = scoreRef.current?.tracks[0]?.staves[0];
+      if (!staff) return null;
+      let nearest: { beat: alphaTab.model.Beat; distance: number } | null = null;
+      for (const bar of staff.bars) for (const beat of (bar.voices[0]?.beats ?? [])) {
+        const bounds = lookup.findBeat(beat);
+        if (!bounds) continue;
+        const range = beatStringRange(bounds);
+        const verticalDistance = point.y < range.top ? range.top - point.y : point.y > range.bottom ? point.y - range.bottom : 0;
+        if (verticalDistance > 28) continue;
+        const distance = Math.abs(point.x - beatColumnX(bounds)) + verticalDistance * 3;
+        if (!nearest || distance < nearest.distance) nearest = { beat, distance };
+      }
+      return nearest?.beat ?? null;
+    };
     const capturePointerDown = (event: PointerEvent) => {
       host.focus({ preventScroll: true });
       pointerModifiersRef.current = { restart: event.ctrlKey || event.metaKey };
       if (event.button !== 0) return;
+      if (event.pointerType !== "touch" && !editingDisabledRef.current && !savingRef.current) {
+        const point = pointInHost(event);
+        const beat = beatAtPoint(point);
+        if (beat) {
+          dragSelectionRef.current = {
+            pointerId: event.pointerId,
+            startX: point.x,
+            startY: point.y,
+            startBeat: beat,
+            endBeat: beat,
+            moved: false
+          };
+          try { host.setPointerCapture(event.pointerId); } catch { /* capture is best-effort */ }
+        }
+      }
       selectScoreCellFromPointer(event);
+    };
+    const movePointerSelection = (event: PointerEvent) => {
+      const drag = dragSelectionRef.current;
+      if (!drag || drag.pointerId !== event.pointerId || !(event.buttons & 1)) return;
+      const point = pointInHost(event);
+      const wasMoved = drag.moved;
+      if (!wasMoved && Math.hypot(point.x - drag.startX, point.y - drag.startY) < 6) return;
+      drag.moved = true;
+      event.preventDefault();
+      const beat = beatAtPoint(point);
+      if (!beat || (wasMoved && beat === drag.endBeat)) return;
+      drag.endBeat = beat;
+      const columns = beatRangeBeats(drag.startBeat, beat);
+      const notes = columns.flatMap((candidate) => candidate.notes);
+      const anchor = drag.startBeat.notes[0] ?? notes[0] ?? null;
+      clearScoreCursor();
+      setSelection(notes, anchor, true, columns);
+      setEditStatus(`拖选 ${columns.length} 个连续节拍列 · ${notes.length} 个音 · 松开后可 Backspace/Delete 删除`);
+    };
+    const finishPointerSelection = (event: PointerEvent) => {
+      const drag = dragSelectionRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (drag.moved) event.preventDefault();
+      dragSelectionRef.current = null;
+      if (host.hasPointerCapture(event.pointerId)) host.releasePointerCapture(event.pointerId);
     };
     const openRestColumn = (event: MouseEvent) => {
       if (editingDisabledRef.current || savingRef.current) return;
@@ -1118,6 +1233,7 @@ export function AlphaTabPlayer({
       if (!marker) return;
       const onset = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
       const cursor = { beat, onset, string, kind: "rest" as const, marker };
+      if (beat.isEmpty) editableGhostBeatsRef.current.add(beat);
       seekPlaybackToBeat(beat);
       scoreCursorRef.current = cursor;
       setScoreCursor(cursor);
@@ -1133,6 +1249,9 @@ export function AlphaTabPlayer({
         : `第 ${measure} 小节 · 实体休止 ${directDurationLabel(duration)} · Delete 变透明`);
     };
     host.addEventListener("pointerdown", capturePointerDown, true);
+    host.addEventListener("pointermove", movePointerSelection, true);
+    host.addEventListener("pointerup", finishPointerSelection, true);
+    host.addEventListener("pointercancel", finishPointerSelection, true);
     host.addEventListener("contextmenu", openRestColumn, true);
     const attachEngine = () => {
       const output = api.player?.output as alphaTab.synth.IExternalMediaSynthOutput | undefined;
@@ -1219,6 +1338,9 @@ export function AlphaTabPlayer({
       scoreRef.current = null;
       midiRef.current = null;
       host.removeEventListener("pointerdown", capturePointerDown, true);
+      host.removeEventListener("pointermove", movePointerSelection, true);
+      host.removeEventListener("pointerup", finishPointerSelection, true);
+      host.removeEventListener("pointercancel", finishPointerSelection, true);
       host.removeEventListener("contextmenu", openRestColumn, true);
       window.removeEventListener("resize", resize);
       if (initialScrollTimer !== null) window.clearTimeout(initialScrollTimer);
@@ -2248,22 +2370,35 @@ export function AlphaTabPlayer({
     }
     if (!target) return setEditStatus("空弦位不能加入多选；松开 Shift 后可逐点移动过去并输入新音");
     const anchor = selectionAnchorRef.current ?? current;
-    setSelection(beatRangeNotes(anchor, target), anchor, true);
+    const columns = beatRangeBeats(anchor.beat, target.beat);
+    setSelection(columns.flatMap((beat) => beat.notes), anchor, true, columns);
   }
 
   function deleteSelectedNotes() {
     if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
     const selected = selectedNotesRef.current;
-    if (!selected.length) return;
+    const selectedColumns = selectionColumnsRef.current ? selectedColumnBeatsRef.current : [];
+    const selectedRests = selectedColumns.filter((beat) => beat.isRest && !beat.isEmpty);
+    if (!selected.length && !selectedRests.length) return;
     if (recognitionDraftRef.current && selected.some((note) => !recognitionNote(note))) {
       return setEditStatus("删除无法安全映射回保存草稿；请在已展开的六线网格中删除");
     }
-    const entry = historyEntry("删除音符", selected);
-    const touchedBeats = uniqueBeats(selected);
+    const entry = historyEntry(selectedRests.length ? "删除选区" : "删除音符", selected);
+    const touchedBeats = uniqueBeatList([...uniqueBeats(selected), ...selectedRests]);
     for (const beat of touchedBeats) rememberBeat(entry, beat);
     const touchedEvents = new Map<RecognitionMeasure, Set<RecognitionEvent>>();
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
+    for (const beat of selectedRests) {
+      const measure = recognitionMeasureForBeat(beat);
+      const beatStart = Math.round(beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
+      beat.isEmpty = true;
+      editableGhostBeatsRef.current.add(beat);
+      if (measure) {
+        measure.events = measure.events.filter((event) => !(event.rest && Math.abs(event.onset_eighths - beatStart) < 1e-9));
+        dirtyRecognitionMeasuresRef.current.add(measure.number);
+      }
+    }
     for (const note of selected) {
       const linkedOrigins = uniqueNotes([note.hammerPullOrigin, note.slideOrigin, note.slurOrigin].filter((candidate): candidate is alphaTab.model.Note => Boolean(candidate)));
       for (const origin of linkedOrigins) {
@@ -2293,14 +2428,14 @@ export function AlphaTabPlayer({
       dirtyRecognitionMeasuresRef.current.add(measure.number);
     }
     const emptyColumns = touchedBeats.filter((beat) => beat.isEmpty).length;
-    const previewBeat = [...touchedBeats].reverse().find((beat) => beat.isEmpty);
+    const previewBeat = [...(selectedColumns.length ? selectedColumns : touchedBeats)].reverse().find((beat) => beat.isEmpty);
     const previewCursor = previewBeat ? cursorAt(
       previewBeat,
       Math.round(previewBeat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2,
       Math.max(1, Math.ceil((previewBeat.voice.bar.staff.tuning.length || 6) / 2)),
       "rest"
     ) : null;
-    commitEdit(`已删除 ${selected.length} 个音${emptyColumns ? ` · ${emptyColumns} 列变为透明空位` : ""}`, entry, selected);
+    commitEdit(`已删除 ${selected.length} 个音${selectedRests.length ? `、${selectedRests.length} 个休止` : ""}${emptyColumns ? ` · ${emptyColumns} 列变为透明空位` : ""}`, entry, selected);
     setSelection([]);
     if (previewBeat && previewCursor) {
       const duration = beatDurationEighths(previewBeat);
@@ -2519,9 +2654,9 @@ export function AlphaTabPlayer({
   return (
     <div className="alpha-player score-studio">
       <div className="score-studio-commandbar">
-        <div className={`selection-readout ${selectedIds.length ? "active" : ""}`}>
-          <span>{selectedIds.length ? <Check size={15} /> : <PencilLine size={15} />}</span>
-          <div><strong>{selectedIds.length ? `已选 ${selectedIds.length} 个音` : cursorIsEntityRest ? `实体休止 · ${directDurationLabel(beatDurationEighths(scoreCursor!.beat))}` : cursorIsRestColumn ? `透明休止 · ${directDurationLabel(entryDuration)}` : scoreCursor ? `${cursorVisualString} 弦 · 待输入 ${directDurationLabel(entryDuration)}` : "谱面即编辑器"}</strong><small role="status" aria-live="polite">{editStatus}</small></div>
+        <div className={`selection-readout ${selectedIds.length || selectedColumnCount ? "active" : ""}`}>
+          <span>{selectedIds.length || selectedColumnCount ? <Check size={15} /> : <PencilLine size={15} />}</span>
+          <div><strong>{selectedColumnCount ? `已选 ${selectedColumnCount} 个节拍列 · ${selectedIds.length} 个音` : selectedIds.length ? `已选 ${selectedIds.length} 个音` : cursorIsEntityRest ? `实体休止 · ${directDurationLabel(beatDurationEighths(scoreCursor!.beat))}` : cursorIsRestColumn ? `透明休止 · ${directDurationLabel(entryDuration)}` : scoreCursor ? `${cursorVisualString} 弦 · 待输入 ${directDurationLabel(entryDuration)}` : "谱面即编辑器"}</strong><small role="status" aria-live="polite">{editStatus}</small></div>
         </div>
         <div className="notation-command-strip" aria-label="演奏技巧快捷命令">
           {EDIT_COMMANDS.map((command) => (
@@ -2571,17 +2706,18 @@ export function AlphaTabPlayer({
 
       <div className="studio-keyboard-hint">
         <button type="button" onClick={() => setShortcutHelp((value) => !value)}><Keyboard size={13} /> 快捷键 <kbd>?</kbd></button>
-        <span><kbd>Space</kbd> 从定位处播放/暂停</span><span><kbd>点击起点→终点</kbd> 自动连续选择</span><span><kbd>Ctrl/⌘ 点击</kbd> 重设队列起点</span><span><kbd>右键</kbd> 选择整列休止</span><span><kbd>Backspace/Delete</kbd> 删除所选</span><span><kbd>0–9</kbd> 写入品位</span><span><kbd>Enter</kbd> 确认透明休止</span><span><kbd>.</kbd> 单附点开关</span><span><kbd>Ctrl/⌘ .</kbd> 双附点</span><span><kbd>↑↓</kbd> 当前列逐弦</span><span><kbd>←→</kbd> 前后可见节拍列</span><span><kbd>Alt ↑↓</kbd> 保持音高换弦</span><span><kbd>Ctrl/⌘ S</kbd> 保存</span>
+        <span><kbd>Space</kbd> 从定位处播放/暂停</span><span><kbd>左键拖动</kbd> 连续框选节拍列</span><span><kbd>点击起点→终点</kbd> 队列选择</span><span><kbd>右键</kbd> 选择整列休止</span><span><kbd>Backspace/Delete</kbd> 删除所选</span><span><kbd>0–9</kbd> 写入品位</span><span><kbd>Enter</kbd> 确认透明休止</span><span><kbd>.</kbd> 单附点开关</span><span><kbd>Ctrl/⌘ .</kbd> 双附点</span><span><kbd>↑↓</kbd> 当前列逐弦</span><span><kbd>←→</kbd> 前后可见节拍列</span><span><kbd>Alt ↑↓</kbd> 保持音高换弦</span><span><kbd>Ctrl/⌘ S</kbd> 保存</span>
       </div>
-      {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>先点一个音作为队列起点，再点终点会自动包含中间全部节拍；点击选区内音符可改回单选。<kbd>Backspace/Delete</kbd> 删除；<kbd>Esc</kbd> 清空；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
+      {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>在谱面节拍行任意位置按住左键拖动，会连续覆盖起点与终点间的全部节拍列；单击音符可改回单选。<kbd>Backspace/Delete</kbd> 删除；<kbd>Esc</kbd> 清空；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
 
       <div ref={scrollPanelRef} className="score-canvas-panel">
         <div className="score-canvas-content">
           <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可直接在空拍和音符上编辑的乐谱"} />
           <div className="score-selection-layer" aria-hidden="true">
             {measureMarkers.map((marker) => <i className="measure-error-marker" key={`measure-${marker.measure}`} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }}><b>{marker.measure} · {formatQuarterBeats(marker.used)}/{formatQuarterBeats(marker.capacity)}</b></i>)}
-            {selectionMarkers.map((marker) => <i key={marker.id} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }} />)}
-            {scoreCursor && <i className={`score-cell-cursor ${cursorIsRestColumn ? "rest-column" : ""}`} style={{ left: scoreCursor.marker.x, top: scoreCursor.marker.y, width: scoreCursor.marker.width, height: scoreCursor.marker.height }}>{cursorIsRestColumn && !cursorIsEntityRest && <b className="rest-preview"><span>{restGlyph(entryDuration)}</span><small>{directDurationLabel(entryDuration)}</small></b>}</i>}
+            {ghostRestMarkers.map((marker) => <i className="ghost-rest-mask" key={`ghost-${marker.id}`} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }} />)}
+            {selectionMarkers.map((marker) => <i className={marker.kind === "range" ? "range-selection" : undefined} key={marker.id} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }} />)}
+            {scoreCursor && <i className={`score-cell-cursor ${cursorIsRestColumn ? "rest-column" : ""} ${cursorIsRestColumn && !cursorIsEntityRest ? "ghost-rest-column" : ""}`} style={{ left: scoreCursor.marker.x, top: scoreCursor.marker.y, width: scoreCursor.marker.width, height: scoreCursor.marker.height }}>{cursorIsRestColumn && !cursorIsEntityRest && <b className="rest-preview"><span>{restGlyph(entryDuration)}</span><small>{directDurationLabel(entryDuration)}</small></b>}</i>}
           </div>
         </div>
       </div>

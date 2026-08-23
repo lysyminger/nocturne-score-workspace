@@ -637,7 +637,8 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   max-height: none;
   flex: none;
   overflow: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
   scrollbar-gutter: stable;
   margin: 0 auto;
   padding: .8rem;

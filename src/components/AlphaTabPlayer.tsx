@@ -776,11 +776,11 @@ export function AlphaTabPlayer({
 
   function stringYForBeatBounds(bounds: alphaTab.rendering.BeatBounds, alphaString: number) {
     const barBounds = bounds.barBounds;
-    const staff = barBounds.bar.staff;
+    const staff = bounds.beat.voice.bar.staff;
     const stringCount = staff.tuning.length || 6;
     const systemBars = barBounds.masterBarBounds.staffSystemBounds?.bars
       .flatMap((master) => master.bars)
-      .filter((candidate) => candidate.bar.staff === staff) ?? [barBounds];
+      .filter((candidate) => candidate.beats.some((beatBounds) => beatBounds.beat.voice.bar.staff === staff)) ?? [barBounds];
     const samples = systemBars.flatMap((candidate) => candidate.beats.flatMap((beatBounds) =>
       (beatBounds.notes ?? []).map((noteBounds) => ({
         string: noteBounds.note.string,
@@ -860,11 +860,12 @@ export function AlphaTabPlayer({
       const clientTop = hostRect.top + masterBounds.realBounds.y;
       const clientBottom = clientTop + masterBounds.realBounds.h;
       if (viewportRect && (clientBottom < viewportRect.top - 240 || clientTop > viewportRect.bottom + 240)) continue;
-      const barBounds = masterBounds.bars.find((candidate) => (candidate.bar.staff.tuning.length || 0) > 0);
-      const voice = barBounds?.bar.voices[0];
-      if (!barBounds || !voice) continue;
-      const stringCount = barBounds.bar.staff.tuning.length || 6;
-      const capacity = barBounds.bar.masterBar.timeSignatureNumerator * 8 / barBounds.bar.masterBar.timeSignatureDenominator;
+      const barBounds = masterBounds.bars.find((candidate) => candidate.beats.some((beatBounds) => (beatBounds.beat.voice.bar.staff.tuning.length || 0) > 0));
+      const modelBar = barBounds?.beats[0]?.beat.voice.bar;
+      const voice = modelBar?.voices[0];
+      if (!barBounds || !modelBar || !voice) continue;
+      const stringCount = modelBar.staff.tuning.length || 6;
+      const capacity = modelBar.masterBar.timeSignatureNumerator * 8 / modelBar.masterBar.timeSignatureDenominator;
       for (let onset = 0; onset < capacity - 1e-9; onset += 0.5) {
         const beat = voice.beats.find((candidate) => {
           const start = Math.round(candidate.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
@@ -913,8 +914,8 @@ export function AlphaTabPlayer({
       string: point.string,
       marker: {
         id: -1,
-        x: point.marker.x - 5,
-        y: point.marker.y - 5,
+        x: point.marker.x + point.marker.width / 2 - 9,
+        y: point.marker.y + point.marker.height / 2 - 9,
         width: 18,
         height: 18
       }
@@ -947,8 +948,7 @@ export function AlphaTabPlayer({
     if (!beat || lookup.getNoteAtPos(beat, x, y)) return;
     const beatBounds = lookup.findBeat(beat);
     if (!beatBounds) return;
-    const barBounds = beatBounds.barBounds;
-    const stringCount = barBounds.bar.staff.tuning.length || 6;
+    const stringCount = beat.voice.bar.staff.tuning.length || 6;
     if (!stringCount) return;
     const stringRows = Array.from({ length: stringCount }, (_, index) => ({
       visualString: index + 1,

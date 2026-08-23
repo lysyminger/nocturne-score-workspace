@@ -317,6 +317,7 @@ function LibraryScreen({
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [creatingManual, setCreatingManual] = useState(false);
+  const [creatingPdf, setCreatingPdf] = useState(false);
   const [source, setSource] = useState("");
   const [title, setTitle] = useState("");
   const [rights, setRights] = useState(false);
@@ -373,6 +374,22 @@ function LibraryScreen({
     }
   }
 
+  async function createPdfProject(file: File) {
+    setCreatingPdf(true);
+    try {
+      const projectTitle = file.name.replace(/\.pdf$/i, "").slice(0, 120) || "PDF 乐谱";
+      const draft = await api.createManualTabProject({ title: projectTitle, measure_count: 1, tempo_bpm: 120 });
+      const project = await api.uploadPdf(draft.id, file);
+      setProjects((current) => [project, ...current]);
+      showNotice({ message: "PDF 已拆页并开始自动识别", tone: "success" });
+      onOpen(project.id);
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "PDF 项目创建失败", tone: "error" });
+    } finally {
+      setCreatingPdf(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -416,11 +433,18 @@ function LibraryScreen({
 
         <section className="manual-score-composer">
           <div className="manual-score-icon"><FileMusic size={22} /></div>
-          <div><span>START FROM SILENCE</span><h2>从空白六线谱开始</h2><p>建立 8 小节、4/4 拍、标准调弦的可播放乐谱，再逐弦输入与保存。</p></div>
-          <button className="secondary-button" type="button" disabled={creatingManual} onClick={() => void createManualTab()}>
-            {creatingManual ? <LoaderCircle size={16} className="spin" /> : <PencilLine size={16} />}
-            新建空白谱
-          </button>
+          <div><span>START FROM A SCORE</span><h2>上传 PDF 或从空白谱开始</h2><p>PDF 会自动拆页、切分谱行并进入可播放校对；也可以建立 8 小节空白六线谱。</p></div>
+          <div className="score-create-actions">
+            <label className={`secondary-button file-label ${creatingPdf ? "disabled" : ""}`}>
+              {creatingPdf ? <LoaderCircle size={16} className="spin" /> : <FileText size={16} />}
+              上传 PDF
+              <input type="file" accept="application/pdf,.pdf" disabled={creatingPdf} onChange={(event) => { const file = event.target.files?.[0]; if (file) void createPdfProject(file); event.currentTarget.value = ""; }} />
+            </label>
+            <button className="secondary-button" type="button" disabled={creatingManual} onClick={() => void createManualTab()}>
+              {creatingManual ? <LoaderCircle size={16} className="spin" /> : <PencilLine size={16} />}
+              新建空白谱
+            </button>
+          </div>
         </section>
 
         <section className="project-section">
@@ -807,13 +831,14 @@ function ProjectWorkspace({
   const effectiveAudioSource = audioSource === "video" && project.video_url ? "video" : project.audio_url ? "uploaded" : "video";
   const analyzedSourceMatches = project.audio_analysis?.source === (effectiveAudioSource === "uploaded" ? "uploaded_audio" : "video_audio");
   const canAlign = Boolean(practiceAudioUrl && hasVisualScore);
-  const isManualTab = project.source_kind === "manual_tab";
+  const isPdfProject = project.source_kind === "manual_tab" && Boolean(project.pdf_url);
+  const isManualTab = project.source_kind === "manual_tab" && !isPdfProject;
   const canReview = ["tab_cv_tesseract", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "");
   const pdfTabSystems = Object.entries(project.recognition_summary?.layout_counts ?? {}).reduce(
     (total, [layout, count]) => total + (layout.includes("tab") ? count : 0),
     0
   );
-  const hasPdfTab = project.recognition_summary?.engine === "pdf_layout" && pdfTabSystems > 0;
+  const hasPdfTab = isPdfProject && pdfTabSystems > 0;
   const recognizedTechniqueCount = Object.values(project.recognition_summary?.technique_counts ?? {}).reduce((total, count) => total + count, 0);
   const canStartRecognition = project.video_frames.length
     ? capabilities.tab_ocr
@@ -847,6 +872,11 @@ function ProjectWorkspace({
           { number: "01", label: "建立乐谱", complete: true, pending: "" },
           { number: "02", label: "逐弦打谱", complete: Boolean(project.score_file_url), pending: "等待乐谱" },
           { number: "03", label: "试听校对", complete: Boolean(project.score_file_url), pending: "等待音符" },
+          { number: "04", label: "音频对齐", complete: project.sync_points.length >= 2, pending: "可选步骤" }
+        ] : isPdfProject ? [
+          { number: "01", label: "上传 PDF", complete: Boolean(project.pdf_url), pending: "等待文件" },
+          { number: "02", label: "拆分谱行", complete: project.score_images.length > 0, pending: "正在分析" },
+          { number: "03", label: "识别校对", complete: Boolean(project.score_file_url), pending: "等待识别" },
           { number: "04", label: "音频对齐", complete: project.sync_points.length >= 2, pending: "可选步骤" }
         ] : [
           { number: "01", label: "获取视频", complete: Boolean(project.video_url), pending: project.source_metadata ? "等待获取" : "先解析信息" },
@@ -975,6 +1005,12 @@ function ProjectWorkspace({
               <div className="inspector-heading"><span><FileMusic size={16} /></span><div><h3>手动六线谱</h3><p>标准调弦 · 4/4 拍 · 十六分网格</p></div></div>
               <p className="inspector-copy">这份谱不依赖视频。直接在上方谱面的音符或空拍上点击，上下键换弦、左右键移动，再输入 0～36 品。</p>
               <button className="secondary-button full" type="button" onClick={() => void openReviewAt()}><PencilLine size={15} /> 在可播放谱面中打谱</button>
+            </section>
+          ) : isPdfProject ? (
+            <section className="inspector-section source-section manual-source-section">
+              <div className="inspector-heading"><span><FileText size={16} /></span><div><h3>PDF 来源</h3><p>{project.recognition_summary?.page_count ?? "—"} 页 · {project.recognition_summary?.system_count ?? project.score_images.length} 行谱</p></div></div>
+              <p className="inspector-copy">原始 PDF 已保存在私人项目中。系统会按谱行和小节切分；六线谱进入可播放校对，上五线谱保留为节奏与位置对照。</p>
+              {project.pdf_url && <a className="secondary-button full" href={`${project.pdf_url}?download=1`} download><Download size={15} /> 下载原始 PDF</a>}
             </section>
           ) : (
           <section className="inspector-section source-section">

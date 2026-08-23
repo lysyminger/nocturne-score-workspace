@@ -208,6 +208,7 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .manual-score-composer { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .9rem; margin: -3rem 0 4.3rem; padding: .85rem 1rem; border: 1px solid rgba(143,135,244,.16); border-radius: 1rem; background: linear-gradient(110deg, rgba(126,113,235,.08), rgba(255,255,255,.025) 55%, rgba(0,0,0,.08)); box-shadow: inset 0 1px rgba(255,255,255,.035); }
 .manual-score-icon { width: 2.65rem; height: 2.65rem; display: grid; place-items: center; border-radius: .78rem; color: #b0a9ff; background: rgba(139,130,255,.14); box-shadow: inset 0 1px rgba(255,255,255,.07); }
 .manual-score-composer > div:nth-child(2) { min-width: 0; }.manual-score-composer span { color: #736e9c; font-size: .48rem; font-weight: 700; letter-spacing: .14em; }.manual-score-composer h2 { margin: .18rem 0 .14rem; color: #d8d6e8; font-size: .78rem; }.manual-score-composer p { margin: 0; color: #777681; font-size: .56rem; line-height: 1.5; }.manual-score-composer .secondary-button { min-width: 8.6rem; }
+.score-create-actions { display: flex; align-items: center; gap: .5rem; }.score-create-actions .file-label { display: inline-flex; }
 .rights-check { grid-column: 1 / -1; display: flex; align-items: center; gap: .5rem; margin-top: .1rem; color: #6f6f78; font-size: .65rem; cursor: pointer; }
 .rights-check input { position: absolute; opacity: 0; pointer-events: none; }
 .rights-check > span { width: 1rem; height: 1rem; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: .28rem; color: transparent; background: rgba(0,0,0,.2); transition: .16s ease; }
@@ -910,7 +911,7 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   .library-content { padding-top: 3rem; }.library-intro { display: block; }.capability-line { justify-content: start; margin-top: 1.5rem; }
   .source-composer { padding: 4.6rem 1rem 1rem; }.composer-icon { top: 1rem; }
   .source-composer form { grid-template-columns: 1fr; }.rights-check { grid-column: auto; }.source-composer .primary-button { width: 100%; }
-  .manual-score-composer { grid-template-columns: auto minmax(0, 1fr); margin-top: -3.25rem; }.manual-score-composer .secondary-button { grid-column: 1 / -1; width: 100%; }
+  .manual-score-composer { grid-template-columns: auto minmax(0, 1fr); margin-top: -3.25rem; }.score-create-actions { grid-column: 1 / -1; width: 100%; flex-direction: column; }.manual-score-composer .secondary-button { width: 100%; }
   .project-grid { grid-template-columns: 1fr; }
   .workspace-topbar { grid-template-columns: auto 1fr auto; }.workspace-title span, .workspace-status { display: none; }
   .workflow-rail { overflow-x: auto; grid-template-columns: repeat(4, minmax(10rem, 1fr)); justify-content: start; }

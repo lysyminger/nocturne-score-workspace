@@ -106,7 +106,7 @@ def test_manual_tab_project_supports_per_string_chords_and_appending_measures(cl
             "events": [
                 {
                     "onset_eighths": 0.5,
-                    "duration_eighths": 0.5,
+                    "duration_eighths": 0.875,
                     "notes": [
                         {"string": 1, "fret": 7},
                         {"string": 2, "fret": 8},
@@ -118,6 +118,7 @@ def test_manual_tab_project_supports_per_string_chords_and_appending_measures(cl
     )
     assert edited.status_code == 200
     assert [note["string"] for note in edited.json()["measures"][0]["events"][0]["notes"]] == [1, 2, 6]
+    assert edited.json()["measures"][0]["events"][0]["duration_eighths"] == 0.875
 
     appended = client.post(f"/api/projects/{project['id']}/recognition/measures")
     assert appended.status_code == 201
@@ -126,6 +127,7 @@ def test_manual_tab_project_supports_per_string_chords_and_appending_measures(cl
 
     persisted = client.get(f"/api/projects/{project['id']}/recognition").json()
     assert persisted["measures"][0]["events"][0]["notes"][2] == {"string": 6, "fret": 5}
+    assert persisted["measures"][0]["events"][0]["duration_eighths"] == 0.875
     retry = client.post(f"/api/projects/{project['id']}/recognition/measures/1/retry")
     assert retry.status_code == 409
     assert "没有源视频帧" in retry.json()["detail"]

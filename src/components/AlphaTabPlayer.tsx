@@ -94,6 +94,9 @@ type NoteState = {
 
 type BeatState = {
   beat: alphaTab.model.Beat;
+  voice: alphaTab.model.Voice;
+  index: number;
+  present: boolean;
   duration: alphaTab.model.Duration;
   dots: number;
 };
@@ -107,13 +110,29 @@ type HistoryEntry = {
   dirtyRecognitionMeasures: number[];
 };
 
+type DotGestureState = {
+  key: string;
+  time: number;
+  entry: HistoryEntry;
+  historyCommitted: boolean;
+};
+
 type VideoSyncAnchor = { tick: number; timeSeconds: number };
 type PlaybackPosition = { tick: number; endTick: number; endTime: number };
+type RestPlan = {
+  beats: alphaTab.model.Beat[];
+  delta: number;
+  explicitDuration: number;
+  availableDuration: number;
+  insertIndex: number;
+  voice: alphaTab.model.Voice;
+};
 
 const WAV_SAMPLE_RATE = 44_100;
 const MAX_WAV_DURATION_MS = 6 * 60 * 1000;
 const EIGHTH_NOTE_TICKS = 480;
 const MEASURE_EIGHTHS = 8;
+const DOT_GESTURE_MS = 520;
 const DIRECT_DURATIONS = [8, 4, 2, 1, 0.5] as const;
 
 const EDIT_COMMANDS: EditCommand[] = [
@@ -364,10 +383,14 @@ function uniqueBeats(notes: alphaTab.model.Note[]) {
 }
 
 function beatDurationEighths(beat: alphaTab.model.Beat) {
-  const base = beat.duration > 0 ? 8 / beat.duration : 8;
+  const base = beatBaseDurationEighths(beat);
   if (beat.dots === 1) return base * 1.5;
   if (beat.dots >= 2) return base * 1.75;
   return base;
+}
+
+function beatBaseDurationEighths(beat: alphaTab.model.Beat) {
+  return beat.duration > 0 ? 8 / beat.duration : 8;
 }
 
 function alphaDuration(eighths: number) {
@@ -380,6 +403,37 @@ function alphaDuration(eighths: number) {
 
 function directDurationLabel(eighths: number) {
   return ({ 8: "1/1", 4: "1/2", 2: "1/4", 1: "1/8", 0.5: "1/16" } as Record<number, string>)[eighths] ?? `${eighths}/8`;
+}
+
+const REST_DURATION_SHAPES = [
+  { units: 8, duration: alphaTab.model.Duration.Whole, dots: 0 },
+  { units: 7, duration: alphaTab.model.Duration.Half, dots: 2 },
+  { units: 6, duration: alphaTab.model.Duration.Half, dots: 1 },
+  { units: 4, duration: alphaTab.model.Duration.Half, dots: 0 },
+  { units: 3.5, duration: alphaTab.model.Duration.Quarter, dots: 2 },
+  { units: 3, duration: alphaTab.model.Duration.Quarter, dots: 1 },
+  { units: 2, duration: alphaTab.model.Duration.Quarter, dots: 0 },
+  { units: 1.75, duration: alphaTab.model.Duration.Eighth, dots: 2 },
+  { units: 1.5, duration: alphaTab.model.Duration.Eighth, dots: 1 },
+  { units: 1, duration: alphaTab.model.Duration.Eighth, dots: 0 },
+  { units: 0.875, duration: alphaTab.model.Duration.Sixteenth, dots: 2 },
+  { units: 0.75, duration: alphaTab.model.Duration.Sixteenth, dots: 1 },
+  { units: 0.5, duration: alphaTab.model.Duration.Sixteenth, dots: 0 },
+  { units: 0.375, duration: alphaTab.model.Duration.ThirtySecond, dots: 1 },
+  { units: 0.25, duration: alphaTab.model.Duration.ThirtySecond, dots: 0 },
+  { units: 0.125, duration: alphaTab.model.Duration.SixtyFourth, dots: 0 }
+] as const;
+
+function restShapes(units: number) {
+  const shapes: Array<(typeof REST_DURATION_SHAPES)[number]> = [];
+  let remaining = Math.round(units * 8) / 8;
+  for (const shape of REST_DURATION_SHAPES) {
+    while (remaining + 1e-9 >= shape.units) {
+      shapes.push(shape);
+      remaining = Math.round((remaining - shape.units) * 8) / 8;
+    }
+  }
+  return shapes;
 }
 
 function noteMeasure(note: alphaTab.model.Note, recognition: RecognitionDiagnostics | null) {
@@ -431,7 +485,14 @@ function captureNoteState(note: alphaTab.model.Note): NoteState {
 }
 
 function captureBeatState(beat: alphaTab.model.Beat): BeatState {
-  return { beat, duration: beat.duration, dots: beat.dots };
+  return {
+    beat,
+    voice: beat.voice,
+    index: beat.voice.beats.indexOf(beat),
+    present: beat.voice.beats.includes(beat),
+    duration: beat.duration,
+    dots: beat.dots
+  };
 }
 
 function restoreNoteState(state: NoteState) {
@@ -465,6 +526,11 @@ function restoreNoteState(state: NoteState) {
 }
 
 function restoreBeatState(state: BeatState) {
+  const currentIndex = state.voice.beats.indexOf(state.beat);
+  if (state.present && currentIndex < 0) {
+    state.voice.beats.splice(Math.min(state.index, state.voice.beats.length), 0, state.beat);
+    state.beat.voice = state.voice;
+  } else if (!state.present && currentIndex >= 0) state.voice.beats.splice(currentIndex, 1);
   state.beat.duration = state.duration;
   state.beat.dots = state.dots;
 }
@@ -570,6 +636,7 @@ export function AlphaTabPlayer({
   const dirtyRecognitionMeasuresRef = useRef(new Set<number>());
   const digitBufferRef = useRef<{ value: string; time: number } | null>(null);
   const digitHistoryEntryRef = useRef<HistoryEntry | null>(null);
+  const dotGestureRef = useRef<DotGestureState | null>(null);
   const historyBaseDirtyRef = useRef(false);
   const midiRebuildTimerRef = useRef<number | null>(null);
   const lastPlaybackPositionRef = useRef<PlaybackPosition>({ tick: 0, endTick: 0, endTime: 0 });
@@ -689,6 +756,7 @@ export function AlphaTabPlayer({
     setSelectedIds(next.map((note) => note.id));
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
+    dotGestureRef.current = null;
     if (anchor) {
       const measure = noteMeasure(anchor, recognitionRef.current);
       setFocusedMeasure(measure);
@@ -891,13 +959,68 @@ export function AlphaTabPlayer({
     };
   }
 
+  function followingRestPlan(beat: alphaTab.model.Beat, delta: number): RestPlan {
+    const voice = beat.voice;
+    const start = voice.beats.indexOf(beat) + 1;
+    let end = start;
+    while (end < voice.beats.length && voice.beats[end].isRest) end += 1;
+    const beats = voice.beats.slice(start, end);
+    const explicitDuration = beats.reduce((sum, candidate) => sum + beatDurationEighths(candidate), 0);
+    const masterBar = voice.bar.masterBar;
+    const capacity = masterBar.timeSignatureNumerator * 8 / masterBar.timeSignatureDenominator;
+    const voiceDuration = voice.beats.reduce((sum, candidate) => sum + beatDurationEighths(candidate), 0);
+    const implicitDuration = end === voice.beats.length ? Math.max(0, capacity - voiceDuration) : 0;
+    return { beats, delta, explicitDuration, availableDuration: explicitDuration + implicitDuration, insertIndex: start, voice };
+  }
+
+  function rememberBeat(entry: HistoryEntry, beat: alphaTab.model.Beat) {
+    if (!entry.beatStates.some((state) => state.beat === beat)) entry.beatStates.push(captureBeatState(beat));
+  }
+
+  function applyRestPlan(plan: RestPlan, entry: HistoryEntry) {
+    const implicitDuration = Math.max(0, plan.availableDuration - plan.explicitDuration);
+    const explicitDelta = Math.max(0, plan.delta - implicitDuration);
+    if (explicitDelta <= 1e-9) return;
+    const targetDuration = Math.max(0, plan.explicitDuration - Math.min(explicitDelta, plan.explicitDuration));
+    const shapes = restShapes(targetDuration);
+    for (const beat of plan.beats) rememberBeat(entry, beat);
+    for (let index = 0; index < shapes.length; index += 1) {
+      const shape = shapes[index];
+      let beat = plan.beats[index];
+      if (!beat) {
+        beat = new alphaTab.model.Beat();
+        beat.voice = plan.voice;
+        entry.beatStates.push({
+          beat,
+          voice: plan.voice,
+          index: plan.insertIndex + index,
+          present: false,
+          duration: beat.duration,
+          dots: beat.dots
+        });
+        plan.voice.beats.splice(plan.insertIndex + index, 0, beat);
+      }
+      beat.duration = shape.duration;
+      beat.dots = shape.dots;
+    }
+    for (const beat of plan.beats.slice(shapes.length)) {
+      const index = plan.voice.beats.indexOf(beat);
+      if (index >= 0) plan.voice.beats.splice(index, 1);
+    }
+  }
+
+  function recognitionString(note: alphaTab.model.Note, alphaTabString = note.string) {
+    const stringCount = note.beat.voice.bar.staff.tuning.length || 6;
+    return stringCount + 1 - alphaTabString;
+  }
+
   function recognitionNote(note: alphaTab.model.Note, originalString = note.string) {
     const measures = recognitionDraftRef.current;
     if (!measures || !recognition) return null;
     const measure = measures.find((candidate) => candidate.number === noteMeasure(note, recognition));
     const onset = Math.round(note.beat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2;
     const event = measure?.events.find((candidate) => candidate.onset_eighths === onset);
-    const target = event?.notes.find((candidate) => candidate.string === originalString);
+    const target = event?.notes.find((candidate) => candidate.string === recognitionString(note, originalString));
     return measure && event && target ? { measure, event, note: target } : null;
   }
 
@@ -998,6 +1121,7 @@ export function AlphaTabPlayer({
     const entry = historyEntry(command.label, selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
+    dotGestureRef.current = null;
     const recognitionTargets = (command.requiresPair ? [selected[0]] : selected).map((note) => ({
       note,
       target: recognitionDraftRef.current ? recognitionNote(note) : null
@@ -1074,6 +1198,7 @@ export function AlphaTabPlayer({
     if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
     const selected = selectedNotesRef.current.filter((note) => note.isStringed);
     if (!selected.length) return setEditStatus("所选音符没有可编辑的品位");
+    dotGestureRef.current = null;
     const now = Date.now();
     const previous = digitBufferRef.current;
     const continuing = Boolean(previous && digitHistoryEntryRef.current && now - previous.time < 900);
@@ -1116,6 +1241,7 @@ export function AlphaTabPlayer({
     if (!selected.length) return setEditStatus("请先选择六线谱音符");
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
+    dotGestureRef.current = null;
     const selectedSet = new Set(selected);
     const proposals = new Map<alphaTab.model.Note, { originalString: number; nextString: number; nextFret: number }>();
     for (const note of selected) {
@@ -1205,7 +1331,7 @@ export function AlphaTabPlayer({
       const target = recognitionNote(note, originalString);
       note.string = nextString;
       note.fret = nextFret;
-      if (target) { target.note.string = nextString; target.note.fret = nextFret; }
+      if (target) { target.note.string = recognitionString(note, nextString); target.note.fret = nextFret; }
       markRecognitionChanged(note, originalString);
       moved += 1;
     }
@@ -1248,6 +1374,7 @@ export function AlphaTabPlayer({
     const entry = historyEntry("音符时值", selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
+    dotGestureRef.current = null;
     for (const beat of beats) {
       beat.duration = alphaDuration(eighths);
       beat.dots = 0;
@@ -1257,6 +1384,66 @@ export function AlphaTabPlayer({
       dirtyRecognitionMeasuresRef.current.add(target.measure.number);
     }
     commitEdit(`时值 ${directDurationLabel(eighths)}`, entry, selected);
+  }
+
+  function applySelectedDots() {
+    if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
+    const selected = selectedNotesRef.current;
+    const beats = uniqueBeats(selected);
+    if (!beats.length) {
+      dotGestureRef.current = null;
+      return setEditStatus("请先选择一个或多个音符节拍，再按小键盘 .");
+    }
+    const key = beats.map((beat) => beat.id).sort((left, right) => left - right).join(",");
+    const now = Date.now();
+    const previous = dotGestureRef.current;
+    const continuing = Boolean(previous && previous.key === key && now - previous.time <= DOT_GESTURE_MS);
+    const dots = continuing ? 2 : 1;
+    const factor = dots === 2 ? 1.75 : 1.5;
+    const durations = new Map(beats.map((beat) => [beat, beatBaseDurationEighths(beat) * factor]));
+    const restPlans = beats
+      .map((beat) => followingRestPlan(beat, durations.get(beat)! - beatDurationEighths(beat)))
+      .filter((plan) => plan.delta > 1e-9);
+    for (const plan of restPlans) {
+      if (plan.availableDuration + 1e-9 < plan.delta) {
+        dotGestureRef.current = null;
+        return setEditStatus(`${dots === 2 ? "双附点" : "附点"}前没有足够休止时值，未修改`);
+      }
+    }
+    const recognitionTargets = beats.map((beat) => {
+      const note = beat.notes[0];
+      return { beat, target: note ? recognitionNote(note) : null };
+    });
+    if (recognitionDraftRef.current && recognitionTargets.some(({ target }) => !target)) {
+      dotGestureRef.current = null;
+      return setEditStatus("这个节拍无法安全映射回识别草稿，请在精确网格中修改");
+    }
+    for (const { beat, target } of recognitionTargets) {
+      if (!target) continue;
+      const next = target.measure.events
+        .filter((event) => event.onset_eighths > target.event.onset_eighths)
+        .sort((left, right) => left.onset_eighths - right.onset_eighths)[0];
+      if (target.event.onset_eighths + durations.get(beat)! > (next?.onset_eighths ?? MEASURE_EIGHTHS)) {
+        dotGestureRef.current = null;
+        return setEditStatus(`${dots === 2 ? "双附点" : "附点"}会与后一个节拍重叠，未修改`);
+      }
+    }
+    const entry = continuing && previous ? previous.entry : historyEntry(dots === 2 ? "双附点" : "附点", selected);
+    const changed = beats.some((beat) => beat.dots !== dots);
+    digitBufferRef.current = null;
+    digitHistoryEntryRef.current = null;
+    for (const plan of restPlans) applyRestPlan(plan, entry);
+    for (const beat of beats) beat.dots = dots;
+    for (const { beat, target } of recognitionTargets) if (target) {
+      target.event.duration_eighths = durations.get(beat)!;
+      dirtyRecognitionMeasuresRef.current.add(target.measure.number);
+    }
+    if (continuing && previous?.historyCommitted) rebuildAfterEdit("双附点已应用；两次按键合并为一次撤销", selected);
+    else if (changed) commitEdit(dots === 2 ? "双附点" : "附点", entry, selected);
+    if (continuing) dotGestureRef.current = null;
+    else dotGestureRef.current = { key, time: now, entry, historyCommitted: changed };
+    if (!changed) setEditStatus(dots === 2 ? "所选节拍已经是双附点" : "所选节拍已经是单附点；快速再按一次 . 可设双附点");
+    else if (!continuing) setEditStatus("单附点已应用；快速再按一次 . 可设双附点 · Ctrl/⌘S 保存");
   }
 
   function adjustSelectedBeatDuration(shorter: boolean) {
@@ -1301,6 +1488,7 @@ export function AlphaTabPlayer({
     const entry = historyEntry("删除音符", selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
+    dotGestureRef.current = null;
     for (const note of selected) {
       const linkedOrigins = uniqueNotes([note.hammerPullOrigin, note.slideOrigin, note.slurOrigin].filter((candidate): candidate is alphaTab.model.Note => Boolean(candidate)));
       for (const origin of linkedOrigins) {
@@ -1329,6 +1517,7 @@ export function AlphaTabPlayer({
     if (!entry) return;
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
+    dotGestureRef.current = null;
     for (const state of entry.states) restoreNoteState(state);
     for (const state of entry.beatStates) restoreBeatState(state);
     recognitionDraftRef.current = cloneMeasureDraft(entry.recognition);
@@ -1362,6 +1551,7 @@ export function AlphaTabPlayer({
       historyBaseDirtyRef.current = false;
       digitBufferRef.current = null;
       digitHistoryEntryRef.current = null;
+      dotGestureRef.current = null;
       dirtyRecognitionMeasuresRef.current.clear();
       setDirty(false);
       setEditStatus("已保存到私人曲库");
@@ -1400,6 +1590,7 @@ export function AlphaTabPlayer({
       }
       if (!commandKey && (event.key === "+" || event.key === "=")) { event.preventDefault(); adjustSelectedBeatDuration(true); return; }
       if (!commandKey && (event.key === "-" || event.key === "_")) { event.preventDefault(); adjustSelectedBeatDuration(false); return; }
+      if (event.code === "NumpadDecimal" || event.key === "Decimal" || event.key === ".") { event.preventDefault(); applySelectedDots(); return; }
       if (/^\d$/.test(event.key)) { event.preventDefault(); writeFretDigit(event.key); return; }
       if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteSelectedNotes(); return; }
       const command = EDIT_COMMANDS.find((candidate) => candidate.shortcut.toLowerCase() === event.key.toLowerCase());
@@ -1496,9 +1687,13 @@ export function AlphaTabPlayer({
     } finally { setExporting(null); }
   }
 
-  const selectedBeatDurations = uniqueBeats(selectedNotesRef.current).map(beatDurationEighths);
+  const selectedBeats = uniqueBeats(selectedNotesRef.current);
+  const selectedBeatDurations = selectedBeats.map(beatBaseDurationEighths);
   const selectedBeatDuration = selectedBeatDurations.length && selectedBeatDurations.every((value) => value === selectedBeatDurations[0])
     ? selectedBeatDurations[0]
+    : null;
+  const selectedBeatDots = selectedBeats.length && selectedBeats.every((beat) => beat.dots === selectedBeats[0].dots)
+    ? selectedBeats[0].dots
     : null;
 
   return (
@@ -1542,15 +1737,16 @@ export function AlphaTabPlayer({
         <div className="direct-duration-control" aria-label="所选节拍时值">
           <span>所选时值</span>
           {DIRECT_DURATIONS.map((duration) => <button type="button" key={duration} className={selectedBeatDuration === duration ? "active" : ""} disabled={editingDisabled || saving || !selectedIds.length} onClick={() => setSelectedBeatDuration(duration)} aria-pressed={selectedBeatDuration === duration}>{directDurationLabel(duration)}</button>)}
-          <i>按 <kbd>+</kbd> 缩短，<kbd>−</kbd> 延长</i>
+          <button type="button" className={`dot-duration-button ${selectedBeatDots ? "active" : ""}`} disabled={editingDisabled || saving || !selectedIds.length} onClick={applySelectedDots} aria-pressed={Boolean(selectedBeatDots)} title="单击设附点，快速双击设双附点；快捷键为小键盘 .">{selectedBeatDots === 2 ? "··" : "·"} 附点</button>
+          <i><kbd>+</kbd>/<kbd>−</kbd> 时值 · 小键盘 <kbd>.</kbd> 附点</i>
         </div>
       </div>
 
       <div className="studio-keyboard-hint">
         <button type="button" onClick={() => setShortcutHelp((value) => !value)}><Keyboard size={13} /> 快捷键 <kbd>?</kbd></button>
-        <span><kbd>Space</kbd> 播放/暂停</span><span><kbd>Ctrl/⌘ 点击</kbd> 离散多选</span><span><kbd>Shift 点击/方向键</kbd> 连续选择</span><span><kbd>0–9</kbd> 批量品位</span><span><kbd>↑↓←→</kbd> 移动选区</span><span><kbd>Alt ↑↓</kbd> 保持音高换弦</span><span><kbd>Ctrl/⌘ S</kbd> 保存</span>
+        <span><kbd>Space</kbd> 播放/暂停</span><span><kbd>Ctrl/⌘ 点击</kbd> 离散多选</span><span><kbd>Shift 点击/方向键</kbd> 连续选择</span><span><kbd>0–9</kbd> 批量品位</span><span><kbd>小键盘 . ×1/×2</kbd> 附点 / 双附点</span><span><kbd>↑↓←→</kbd> 移动选区</span><span><kbd>Alt ↑↓</kbd> 保持音高换弦</span><span><kbd>Ctrl/⌘ S</kbd> 保存</span>
       </div>
-      {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>拖过音符可扩展选区；<kbd>Esc</kbd> 清空；<kbd>Delete</kbd> 删除；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
+      {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>拖过音符可扩展选区；小键盘 <kbd>.</kbd> 一次附点、快速两次双附点；<kbd>Esc</kbd> 清空；<kbd>Delete</kbd> 删除；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
 
       <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可选择和编辑的乐谱"} />
       <div className="score-selection-layer" aria-hidden="true">

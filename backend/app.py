@@ -129,7 +129,7 @@ class TabNoteEdit(BaseModel):
 
 class TabEventEdit(BaseModel):
     onset_eighths: float = Field(ge=0, lt=8, multiple_of=0.5)
-    duration_eighths: float = Field(ge=0.5, le=8, multiple_of=0.5)
+    duration_eighths: float = Field(ge=0.5, le=8, multiple_of=0.125)
     notes: list[TabNoteEdit] = Field(min_length=1, max_length=6)
 
 

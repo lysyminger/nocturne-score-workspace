@@ -18,11 +18,18 @@ type Props = {
 
 type SelectedCell = { onset: number; string: number };
 type TimeSelection = { anchor: number; focus: number };
+type DotInputState = {
+  key: string;
+  time: number;
+  bases: Record<string, number>;
+  historyCommitted: boolean;
+};
 
 const GRID_STEP = 0.5;
 const GRID_SLOTS = 16;
 const MEASURE_UNITS = 8;
-const DURATION_OPTIONS = [0.5, 1, 1.5, 2, 3, 4, 6, 8];
+const DOT_GESTURE_MS = 520;
+const DURATION_OPTIONS = [0.5, 0.75, 0.875, 1, 1.5, 1.75, 2, 3, 3.5, 4, 6, 7, 8];
 const POWER_OF_TWO_DURATIONS = [0.5, 1, 2, 4, 8];
 const TECHNIQUES: Array<{ id: TabTechnique; label: string; mark: string; shortcut: string }> = [
   { id: "legato", label: "连音", mark: "⌒", shortcut: "L" },
@@ -64,14 +71,28 @@ function clamp(value: number, minimum: number, maximum: number) {
 function durationLabel(units: number) {
   return ({
     0.5: "1/16",
+    0.75: "附点 1/16",
+    0.875: "双附点 1/16",
     1: "1/8",
     1.5: "附点 1/8",
+    1.75: "双附点 1/8",
     2: "1/4",
     3: "附点 1/4",
+    3.5: "双附点 1/4",
     4: "1/2",
     6: "附点 1/2",
+    7: "双附点 1/2",
     8: "全音符"
   } as Record<number, string>)[units] ?? `${units}/8`;
+}
+
+function durationShape(units: number) {
+  for (const base of POWER_OF_TWO_DURATIONS) {
+    if (Math.abs(units - base) < 1e-9) return { base, dots: 0 };
+    if (Math.abs(units - base * 1.5) < 1e-9) return { base, dots: 1 };
+    if (Math.abs(units - base * 1.75) < 1e-9) return { base, dots: 2 };
+  }
+  return null;
 }
 
 function beatLabel(onset: number) {
@@ -95,6 +116,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
   const [redoStack, setRedoStack] = useState<RecognitionEvent[][]>([]);
   const [fretDraft, setFretDraft] = useState("");
   const digitBufferRef = useRef<{ key: string; value: string; time: number } | null>(null);
+  const dotInputRef = useRef<DotInputState | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const saveInFlightRef = useRef(false);
   const dragSelectionRef = useRef<{ pointerId: number; anchor: number } | null>(null);
@@ -114,6 +136,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     setUndoStack([]);
     setRedoStack([]);
     digitBufferRef.current = null;
+    dotInputRef.current = null;
   }, [measureNumber, diagnostics]);
 
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
@@ -159,10 +182,17 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
 
   function markChanged(nextEvents: RecognitionEvent[]) {
     if (busy || saveInFlightRef.current) return;
+    dotInputRef.current = null;
     const normalized = copyEvents(nextEvents).sort((left, right) => left.onset_eighths - right.onset_eighths);
     if (sameEvents(events, normalized)) return;
     setUndoStack((current) => [...current.slice(-99), copyEvents(events)]);
     setRedoStack([]);
+    setEvents(normalized);
+    setDirty(!sameEvents(normalized, baselineRef.current));
+  }
+
+  function replaceChangedWithoutHistory(nextEvents: RecognitionEvent[]) {
+    const normalized = copyEvents(nextEvents).sort((left, right) => left.onset_eighths - right.onset_eighths);
     setEvents(normalized);
     setDirty(!sameEvents(normalized, baselineRef.current));
   }
@@ -181,6 +211,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     setEvents(normalized);
     setDirty(!sameEvents(normalized, baselineRef.current));
     digitBufferRef.current = null;
+    dotInputRef.current = null;
   }
 
   function undo() {
@@ -206,6 +237,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
   function selectCell(onset: number, string: number, extend = false) {
     const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP);
     const targetString = clamp(string, 1, 6);
+    dotInputRef.current = null;
     setSelectedCell({ onset: targetOnset, string: targetString });
     setTimeSelection((current) => extend
       ? { ...current, focus: targetOnset }
@@ -219,6 +251,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     if (busy || saveInFlightRef.current) return;
     const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP);
     const anchor = event.shiftKey ? timeSelection.anchor : targetOnset;
+    dotInputRef.current = null;
     dragSelectionRef.current = { pointerId: event.pointerId, anchor };
     gridRef.current?.setPointerCapture(event.pointerId);
     setSelectedCell({ onset: targetOnset, string });
@@ -368,6 +401,51 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     setEditStatus(`已把 ${selected.size} 个节拍改为 ${durationLabel(duration)}`);
   }
 
+  function applyDots() {
+    if (busy || saveInFlightRef.current) return;
+    if (!selectedEventIndexes.length) {
+      dotInputRef.current = null;
+      setEditStatus("请先选择一个或多个音符节拍，再按小键盘 .");
+      return;
+    }
+    const key = `${measureNumber}:${selectedEventIndexes.map((index) => events[index].onset_eighths).join(",")}`;
+    const now = Date.now();
+    const previous = dotInputRef.current;
+    const continuing = Boolean(previous && previous.key === key && now - previous.time <= DOT_GESTURE_MS);
+    const bases = continuing && previous
+      ? previous.bases
+      : Object.fromEntries(selectedEventIndexes.map((index) => {
+          const event = events[index];
+          return [String(event.onset_eighths), durationShape(event.duration_eighths)?.base];
+        }).filter((entry): entry is [string, number] => entry[1] !== undefined));
+    if (Object.keys(bases).length !== selectedEventIndexes.length) {
+      dotInputRef.current = null;
+      setEditStatus("所选节拍含非标准时值，请先用 + / − 改成标准音符");
+      return;
+    }
+    const dots = continuing ? 2 : 1;
+    const factor = dots === 2 ? 1.75 : 1.5;
+    const selected = new Set(selectedEventIndexes);
+    const nextEvents = events.map((event, index) => selected.has(index)
+      ? { ...event, duration_eighths: bases[String(event.onset_eighths)] * factor }
+      : event);
+    if (!validEvents(nextEvents)) {
+      dotInputRef.current = null;
+      setEditStatus(`${dots === 2 ? "双附点" : "附点"}会与后一个音重叠或越过小节线，未应用`);
+      return;
+    }
+    const changed = !sameEvents(events, nextEvents);
+    if (continuing && previous?.historyCommitted) replaceChangedWithoutHistory(nextEvents);
+    else if (changed) markChanged(nextEvents);
+    const firstDuration = nextEvents[selectedEventIndexes[0]]?.duration_eighths;
+    if (firstDuration !== undefined) setEntryDuration(firstDuration);
+    if (continuing) dotInputRef.current = null;
+    else dotInputRef.current = { key, time: now, bases, historyCommitted: changed };
+    setEditStatus(dots === 2
+      ? `已把 ${selected.size} 个节拍设为双附点；这两次按键合并为一次撤销`
+      : `已把 ${selected.size} 个节拍设为单附点；快速再按一次 . 可设双附点`);
+  }
+
   function adjustDuration(shorter: boolean) {
     const current = selectedEventIndex >= 0 ? events[selectedEventIndex].duration_eighths : entryDuration;
     const candidates = POWER_OF_TWO_DURATIONS.filter((value) => shorter ? value < current : value > current);
@@ -413,6 +491,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
       ? clamp(selectedCell.onset + horizontal * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP)
       : selectedCell.onset;
     const string = clamp(selectedCell.string + vertical, 1, 6);
+    dotInputRef.current = null;
     setSelectedCell({ onset, string });
     setTimeSelection((current) => extend && horizontal
       ? { ...current, focus: onset }
@@ -451,6 +530,11 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     if (/^\d$/.test(event.key)) {
       handle();
       writeDigit(event.key);
+      return;
+    }
+    if (event.code === "NumpadDecimal" || event.key === "Decimal" || event.key === ".") {
+      handle();
+      applyDots();
       return;
     }
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
@@ -631,6 +715,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
                   <button type="button" key={value} className={entryDuration === value ? "active" : ""} onClick={() => applyDuration(value)} aria-pressed={entryDuration === value}>{durationLabel(value)}</button>
                 ))}
               </div>
+              <button type="button" className={`dot-command ${selectedEvents.length && selectedEvents.every((item) => (durationShape(item.duration_eighths)?.dots ?? 0) > 0) ? "active" : ""}`} onClick={applyDots} title="单击设附点，快速双击设双附点；快捷键为小键盘 ."><b>{selectedEvents.length && selectedEvents.every((item) => durationShape(item.duration_eighths)?.dots === 2) ? "··" : "·"}</b><span>附点</span><kbd>.</kbd></button>
               <button type="button" className="rest-command" onClick={makeSelectionRest}><b>𝄽</b><span>休止</span><kbd>R</kbd></button>
               {canRetryRecognition && <button type="button" className="retry-measure-command" disabled={busy || retrying} onClick={() => void retryMeasureRecognition()}><RefreshCw size={13} className={retrying ? "spin" : ""} /><span>{retrying ? "识别中" : "重识别本小节"}</span></button>}
             </div>
@@ -706,7 +791,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
               ))}
             </div>
             <div className="grid-edit-status" role="status" aria-live="polite">{editStatus}</div>
-            <div className="keyboard-hints"><span><kbd>0–9</kbd> 当前弦品位</span><span><kbd>↑↓</kbd> 换弦</span><span><kbd>←→</kbd> 逐十六分移动</span><span><kbd>Shift ←→</kbd> 扩展选区</span><span><kbd>Alt ↑↓←→</kbd> 移动音符</span><span><kbd>+ / −</kbd> 缩短 / 延长</span><span><kbd>Del</kbd> 仅删当前弦</span><span><kbd>Ctrl Z</kbd> 撤销</span><span><kbd>Ctrl S</kbd> 保存</span></div>
+            <div className="keyboard-hints"><span><kbd>0–9</kbd> 当前弦品位</span><span><kbd>小键盘 . ×1/×2</kbd> 附点 / 双附点</span><span><kbd>↑↓</kbd> 换弦</span><span><kbd>←→</kbd> 逐十六分移动</span><span><kbd>Shift ←→</kbd> 扩展选区</span><span><kbd>Alt ↑↓←→</kbd> 移动音符</span><span><kbd>+ / −</kbd> 缩短 / 延长</span><span><kbd>Del</kbd> 仅删当前弦</span><span><kbd>Ctrl Z</kbd> 撤销</span><span><kbd>Ctrl S</kbd> 保存</span></div>
           </div>
         </div>
 

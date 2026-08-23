@@ -862,34 +862,42 @@ def _pitch_xml(parent: ET.Element, midi: int) -> None:
     ET.SubElement(pitch, "octave").text = str(midi // 12 - 1)
 
 
-def _duration_notation(duration: float) -> tuple[str, bool]:
+def _duration_notation(duration: float) -> tuple[str, int]:
     mapping = {
-        0.5: ("16th", False),
-        1: ("eighth", False),
-        1.5: ("eighth", True),
-        2: ("quarter", False),
-        3: ("quarter", True),
-        4: ("half", False),
-        6: ("half", True),
-        8: ("whole", False),
+        1: ("64th", 0),
+        2: ("32nd", 0),
+        3: ("32nd", 1),
+        4: ("16th", 0),
+        6: ("16th", 1),
+        7: ("16th", 2),
+        8: ("eighth", 0),
+        12: ("eighth", 1),
+        14: ("eighth", 2),
+        16: ("quarter", 0),
+        24: ("quarter", 1),
+        28: ("quarter", 2),
+        32: ("half", 0),
+        48: ("half", 1),
+        56: ("half", 2),
+        64: ("whole", 0),
     }
-    return mapping.get(duration, ("eighth", False))
+    return mapping.get(round(duration * 8), ("eighth", 0))
 
 
 def _musicxml_duration(duration: float) -> str:
-    return str(round(duration * 2))
+    return str(round(duration * 8))
 
 
 def _append_rest(measure_xml: ET.Element, duration: float) -> None:
     remaining = duration
-    for chunk in (8, 6, 4, 3, 2, 1.5, 1, 0.5):
+    for chunk in (8, 7, 6, 4, 3.5, 3, 2, 1.75, 1.5, 1, 0.875, 0.75, 0.5, 0.375, 0.25, 0.125):
         while remaining + 1e-9 >= chunk:
             note = ET.SubElement(measure_xml, "note")
             ET.SubElement(note, "rest")
             ET.SubElement(note, "duration").text = _musicxml_duration(chunk)
-            note_type, dotted = _duration_notation(chunk)
+            note_type, dot_count = _duration_notation(chunk)
             ET.SubElement(note, "type").text = note_type
-            if dotted:
+            for _ in range(dot_count):
                 ET.SubElement(note, "dot")
             remaining -= chunk
 
@@ -958,8 +966,8 @@ def _build_musicxml(
         measure_xml = ET.SubElement(part, "measure", number=str(number))
         if number == start_number:
             attributes = ET.SubElement(measure_xml, "attributes")
-            # Four divisions per quarter note preserve sixteenth-note edits.
-            ET.SubElement(attributes, "divisions").text = "4"
+            # Sixteen divisions per quarter preserve double-dotted sixteenth notes.
+            ET.SubElement(attributes, "divisions").text = "16"
             key = ET.SubElement(attributes, "key")
             ET.SubElement(key, "fifths").text = "0"
             time = ET.SubElement(attributes, "time")
@@ -1001,9 +1009,9 @@ def _build_musicxml(
                 _pitch_xml(note, midi)
                 ET.SubElement(note, "duration").text = _musicxml_duration(event.duration)
                 ET.SubElement(note, "voice").text = "1"
-                note_type, dotted = _duration_notation(event.duration)
+                note_type, dot_count = _duration_notation(event.duration)
                 ET.SubElement(note, "type").text = note_type
-                if dotted:
+                for _ in range(dot_count):
                     ET.SubElement(note, "dot")
                 if tab_note.technique == "dead_note":
                     ET.SubElement(note, "notehead").text = "x"
@@ -1316,11 +1324,11 @@ def update_recognized_measure(
     if not start_measure <= measure_number <= end_measure:
         raise ValueError(f"小节号必须在 {start_measure}～{end_measure} 之间")
 
-    def half_eighth(value: object, label: str) -> float:
+    def quantized_eighth(value: object, label: str, multiplier: int, grid_label: str) -> float:
         number = float(value)
-        if not math.isfinite(number) or abs(number * 2 - round(number * 2)) > 1e-9:
-            raise ValueError(f"{label}必须落在十六分音符网格上")
-        return round(number * 2) / 2
+        if not math.isfinite(number) or abs(number * multiplier - round(number * multiplier)) > 1e-9:
+            raise ValueError(f"{label}必须落在{grid_label}网格上")
+        return round(number * multiplier) / multiplier
 
     normalized_events: list[TabEvent] = []
     previous_end = 0.0
@@ -1328,8 +1336,8 @@ def update_recognized_measure(
         events,
         key=lambda item: (float(item["onset_eighths"]), float(item["duration_eighths"])),
     ):
-        onset = half_eighth(raw_event["onset_eighths"], "音符起点")
-        duration = half_eighth(raw_event["duration_eighths"], "音符时值")
+        onset = quantized_eighth(raw_event["onset_eighths"], "音符起点", 2, "十六分音符")
+        duration = quantized_eighth(raw_event["duration_eighths"], "音符时值", 8, "六十四分音符")
         if onset < 0 or onset >= EIGHTH_UNITS_PER_MEASURE:
             raise ValueError("音符起点超出当前 4/4 小节范围")
         if duration < 0.5 or duration > EIGHTH_UNITS_PER_MEASURE:

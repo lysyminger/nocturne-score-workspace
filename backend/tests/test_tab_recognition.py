@@ -149,7 +149,7 @@ def test_musicxml_splits_nonstandard_rest_lengths(tmp_path):
 
     root = ET.parse(output).getroot()
     rest_durations = [int(note.findtext("duration")) for note in root.findall(".//note") if note.find("rest") is not None]
-    assert rest_durations == [8, 2, 4]
+    assert rest_durations == [32, 8, 16]
 
 
 def test_musicxml_preserves_sixteenth_note_and_rest(tmp_path):
@@ -165,13 +165,35 @@ def test_musicxml_preserves_sixteenth_note_and_rest(tmp_path):
     _build_musicxml("十六分音符测试", {1: candidate}, output, 120)
 
     root = ET.parse(output).getroot()
-    assert root.findtext(".//divisions") == "4"
+    assert root.findtext(".//divisions") == "16"
     played_note = next(note for note in root.findall(".//note") if note.find("pitch") is not None)
-    assert played_note.findtext("duration") == "1"
+    assert played_note.findtext("duration") == "4"
     assert played_note.findtext("type") == "16th"
     first_rest = next(note for note in root.findall(".//note") if note.find("rest") is not None)
-    assert first_rest.findtext("duration") == "1"
+    assert first_rest.findtext("duration") == "4"
     assert first_rest.findtext("type") == "16th"
+
+
+def test_musicxml_preserves_double_dotted_sixteenth_and_fractional_rest(tmp_path):
+    candidate = MeasureCandidate(
+        number=1,
+        events=(TabEvent(0, 0.875, (TabNote(1, 7),)),),
+        quality=100,
+        source_time=0,
+        signature=((0, 1, 7),),
+    )
+    output = tmp_path / "double-dotted.musicxml"
+
+    _build_musicxml("双附点测试", {1: candidate}, output, 120)
+
+    root = ET.parse(output).getroot()
+    played_note = next(note for note in root.findall(".//note") if note.find("pitch") is not None)
+    assert root.findtext(".//divisions") == "16"
+    assert played_note.findtext("duration") == "7"
+    assert played_note.findtext("type") == "16th"
+    assert len(played_note.findall("dot")) == 2
+    rest_durations = [int(note.findtext("duration")) for note in root.findall(".//note") if note.find("rest") is not None]
+    assert sum(rest_durations) == 57
 
 
 def test_musicxml_writes_guitar_techniques_and_link_endpoints(tmp_path):
@@ -281,3 +303,43 @@ def test_updates_recognized_measure_and_rebuilds_musicxml(tmp_path):
         "technique": "bend",
     }
     assert root.findtext(".//bend/bend-alter") == "2"
+
+
+def test_updates_recognized_measure_with_double_dotted_duration(tmp_path):
+    score_path = tmp_path / "recognized-tab.musicxml"
+    diagnostics_path = tmp_path / "recognition.json"
+    original = MeasureCandidate(
+        number=1,
+        events=(TabEvent(0, 1, (TabNote(1, 3),)),),
+        quality=90,
+        source_time=0,
+        signature=((0, 1, 3),),
+    )
+    _build_musicxml("双附点编辑", {1: original}, score_path, 120)
+    diagnostics_path.write_text(
+        """{
+          "summary": {"start_measure": 1, "end_measure": 1, "estimated_tempo_bpm": 120},
+          "frames": [],
+          "measures": [{
+            "number": 1,
+            "quality": 90,
+            "source_time": 0,
+            "events": [{"onset_eighths": 0, "duration_eighths": 1, "notes": [{"string": 1, "fret": 3}]}]
+          }]
+        }""",
+        encoding="utf-8",
+    )
+
+    result = update_recognized_measure(
+        score_path,
+        diagnostics_path,
+        title="双附点编辑",
+        measure_number=1,
+        events=[{"onset_eighths": 0, "duration_eighths": 0.875, "notes": [{"string": 1, "fret": 3}]}],
+    )
+
+    root = ET.parse(score_path).getroot()
+    played_note = next(note for note in root.findall(".//note") if note.find("pitch") is not None)
+    assert result["measures"][0]["events"][0]["duration_eighths"] == 0.875
+    assert played_note.findtext("duration") == "7"
+    assert len(played_note.findall("dot")) == 2

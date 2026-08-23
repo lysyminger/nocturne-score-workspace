@@ -10,6 +10,7 @@ export type Capabilities = {
   yt_dlp: boolean;
   audiveris: boolean;
   tab_ocr: boolean;
+  ai_tab_recognition: boolean;
   audio_analysis: boolean;
 };
 
@@ -20,6 +21,9 @@ export type RecognitionSummary = {
   start_measure?: number;
   end_measure?: number;
   estimated_tempo_bpm?: number;
+  time_signature_numerator?: number;
+  time_signature_denominator?: number;
+  invalid_measures?: number[];
   confidence?: number;
   glyph_coverage?: number;
   recognized_glyphs?: number;
@@ -98,6 +102,16 @@ export type RecognitionEvent = {
   onset_eighths: number;
   duration_eighths: number;
   notes: RecognitionNote[];
+  rest?: boolean;
+};
+
+export type MeasureValidation = {
+  capacity_eighths: number;
+  committed_eighths: number;
+  missing_eighths: number;
+  overflow_eighths: number;
+  has_gaps: boolean;
+  is_complete: boolean;
 };
 
 export type RecognitionMeasure = {
@@ -105,6 +119,8 @@ export type RecognitionMeasure = {
   quality: number;
   source_time: number;
   events: RecognitionEvent[];
+  time_signature?: { numerator: number; denominator: number };
+  validation?: MeasureValidation;
 };
 
 export type RecognitionFrame = {

@@ -128,13 +128,20 @@ class TabNoteEdit(BaseModel):
 
 
 class TabEventEdit(BaseModel):
-    onset_eighths: float = Field(ge=0, lt=8, multiple_of=0.5)
-    duration_eighths: float = Field(ge=0.5, le=8, multiple_of=0.125)
-    notes: list[TabNoteEdit] = Field(min_length=1, max_length=6)
+    onset_eighths: float = Field(ge=0, lt=64, multiple_of=0.5)
+    duration_eighths: float = Field(ge=0.5, le=64, multiple_of=0.125)
+    notes: list[TabNoteEdit] = Field(default_factory=list, max_length=6)
+    rest: bool = False
+
+
+class TimeSignatureEdit(BaseModel):
+    numerator: int = Field(ge=1, le=32)
+    denominator: int = Field(default=4)
 
 
 class TabMeasureEdit(BaseModel):
     events: list[TabEventEdit] = Field(max_length=32)
+    time_signature: TimeSignatureEdit | None = None
 
 
 def capability_status() -> dict:
@@ -161,6 +168,7 @@ def capability_status() -> dict:
         "audiveris_path": audiveris_path or None,
         "tab_ocr": bool(tesseract_path and tab_cv_available),
         "tesseract_path": tesseract_path or None,
+        "ai_tab_recognition": bool(os.getenv("NOCTURNE_VISION_MODEL")),
         "audio_analysis": ffmpeg_available,
     }
 
@@ -1411,6 +1419,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 title=project["title"],
                 measure_number=measure_number,
                 events=[event.model_dump() for event in body.events],
+                time_signature=(body.time_signature.numerator, body.time_signature.denominator)
+                if body.time_signature else None,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

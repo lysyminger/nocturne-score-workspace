@@ -48,6 +48,7 @@ const EMPTY_CAPABILITIES: Capabilities = {
   yt_dlp: false,
   audiveris: false,
   tab_ocr: false,
+  ai_tab_recognition: false,
   audio_analysis: false
 };
 
@@ -645,11 +646,11 @@ function ProjectWorkspace({
     }
   }
 
-  async function saveReviewedMeasure(measureNumber: number, events: RecognitionEvent[]) {
+  async function saveReviewedMeasure(measureNumber: number, events: RecognitionEvent[], timeSignature: { numerator: number; denominator: number }) {
     if (!project) return;
     setAction("review-save");
     try {
-      const diagnostics = await api.updateRecognitionMeasure(project.id, measureNumber, events);
+      const diagnostics = await api.updateRecognitionMeasure(project.id, measureNumber, events, timeSignature);
       setRecognition(diagnostics);
       const refreshed = await refresh();
       setScoreRevision(refreshed.updated_at);

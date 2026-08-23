@@ -384,3 +384,55 @@ def test_updates_recognized_measure_with_double_dotted_duration(tmp_path):
     assert result["measures"][0]["events"][0]["duration_eighths"] == 0.875
     assert played_note.findtext("duration") == "7"
     assert len(played_note.findall("dot")) == 2
+
+
+def test_explicit_rests_complete_measure_and_render_as_rests(tmp_path):
+    score_path = tmp_path / "explicit-rest.musicxml"
+    diagnostics_path = tmp_path / "recognition.json"
+    result = create_blank_tab_score(tmp_path, title="节拍校验", measure_count=1, tempo_bpm=120)
+    score_path.write_bytes(result.score_path.read_bytes())
+    diagnostics_path.write_bytes(result.diagnostics_path.read_bytes())
+
+    diagnostics = update_recognized_measure(
+        score_path,
+        diagnostics_path,
+        title="节拍校验",
+        measure_number=1,
+        events=[
+            {"onset_eighths": 0, "duration_eighths": 2, "notes": [{"string": 1, "fret": 3}]},
+            {"onset_eighths": 2, "duration_eighths": 6, "notes": [], "rest": True},
+        ],
+    )
+
+    measure = diagnostics["measures"][0]
+    assert measure["events"][1]["rest"] is True
+    assert measure["validation"] == {
+        "capacity_eighths": 8.0,
+        "committed_eighths": 8.0,
+        "missing_eighths": 0.0,
+        "overflow_eighths": 0.0,
+        "has_gaps": False,
+        "is_complete": True,
+    }
+    assert diagnostics["summary"]["invalid_measures"] == []
+    root = ET.parse(score_path).getroot()
+    assert root.find(".//rest") is not None
+
+
+def test_gap_keeps_measure_invalid_even_when_durations_add_up(tmp_path):
+    result = create_blank_tab_score(tmp_path, title="空洞校验", measure_count=1, tempo_bpm=120)
+
+    diagnostics = update_recognized_measure(
+        result.score_path,
+        result.diagnostics_path,
+        title="空洞校验",
+        measure_number=1,
+        events=[
+            {"onset_eighths": 0, "duration_eighths": 4, "notes": [{"string": 1, "fret": 3}]},
+            {"onset_eighths": 5, "duration_eighths": 3, "notes": [], "rest": True},
+        ],
+    )
+
+    assert diagnostics["measures"][0]["validation"]["has_gaps"] is True
+    assert diagnostics["measures"][0]["validation"]["is_complete"] is False
+    assert diagnostics["summary"]["invalid_measures"] == [1]

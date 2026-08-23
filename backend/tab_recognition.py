@@ -120,6 +120,7 @@ class MeasureCandidate:
     signature: tuple[tuple[float, int, int], ...]
     source_path: Path | None = None
     crop_box: tuple[int, int, int, int] | None = None
+    time_signature: tuple[int, int] = (4, 4)
 
 
 @dataclass
@@ -1112,6 +1113,44 @@ def _append_rest(measure_xml: ET.Element, duration: float) -> None:
             remaining -= chunk
 
 
+def _measure_capacity_eighths(time_signature: tuple[int, int]) -> float:
+    numerator, denominator = time_signature
+    if numerator < 1 or denominator not in {1, 2, 4, 8, 16, 32}:
+        raise ValueError("拍号无效")
+    return numerator * 8 / denominator
+
+
+def _measure_validation(
+    events: tuple[TabEvent, ...] | list[TabEvent],
+    capacity: float,
+) -> dict:
+    ordered = sorted(events, key=lambda event: event.onset)
+    cursor = 0.0
+    committed = 0.0
+    has_gaps = False
+    overflow = 0.0
+    for event in ordered:
+        if event.onset > cursor + 1e-9:
+            has_gaps = True
+        if event.onset < cursor - 1e-9:
+            overflow = max(overflow, cursor - event.onset)
+        cursor = max(cursor, event.onset + event.duration)
+        committed += event.duration
+    if cursor < capacity - 1e-9:
+        has_gaps = True
+    overflow = max(overflow, cursor - capacity, committed - capacity, 0.0)
+    missing = max(0.0, capacity - committed)
+    complete = not has_gaps and overflow <= 1e-9 and abs(committed - capacity) <= 1e-9
+    return {
+        "capacity_eighths": round(capacity, 3),
+        "committed_eighths": round(committed, 3),
+        "missing_eighths": round(missing, 3),
+        "overflow_eighths": round(overflow, 3),
+        "has_gaps": has_gaps,
+        "is_complete": complete,
+    }
+
+
 def _tab_note_from_dict(value: dict) -> TabNote:
     technique = value.get("technique") or None
     if technique is not None and technique not in TAB_TECHNIQUES:
@@ -1172,27 +1211,33 @@ def _build_musicxml(
     technique_starts, technique_stops = _technique_links(measures)
     start_number = min(measures)
     end_number = max(measures)
+    previous_time_signature: tuple[int, int] | None = None
     for number in range(start_number, end_number + 1):
         measure_xml = ET.SubElement(part, "measure", number=str(number))
-        if number == start_number:
+        candidate = measures.get(number)
+        time_signature = candidate.time_signature if candidate else previous_time_signature or (4, 4)
+        if number == start_number or time_signature != previous_time_signature:
             attributes = ET.SubElement(measure_xml, "attributes")
-            # Sixteen divisions per quarter preserve double-dotted sixteenth notes.
-            ET.SubElement(attributes, "divisions").text = "16"
-            key = ET.SubElement(attributes, "key")
-            ET.SubElement(key, "fifths").text = "0"
+            if number == start_number:
+                # Sixteen divisions per quarter preserve double-dotted sixteenth notes.
+                ET.SubElement(attributes, "divisions").text = "16"
+                key = ET.SubElement(attributes, "key")
+                ET.SubElement(key, "fifths").text = "0"
             time = ET.SubElement(attributes, "time")
-            ET.SubElement(time, "beats").text = "4"
-            ET.SubElement(time, "beat-type").text = "4"
-            clef = ET.SubElement(attributes, "clef")
-            ET.SubElement(clef, "sign").text = "TAB"
-            ET.SubElement(clef, "line").text = "5"
-            staff_details = ET.SubElement(attributes, "staff-details")
-            ET.SubElement(staff_details, "staff-lines").text = "6"
-            tuning = ((1, "E", 2), (2, "A", 2), (3, "D", 3), (4, "G", 3), (5, "B", 3), (6, "E", 4))
-            for line, step, octave in tuning:
-                staff_tuning = ET.SubElement(staff_details, "staff-tuning", line=str(line))
-                ET.SubElement(staff_tuning, "tuning-step").text = step
-                ET.SubElement(staff_tuning, "tuning-octave").text = str(octave)
+            ET.SubElement(time, "beats").text = str(time_signature[0])
+            ET.SubElement(time, "beat-type").text = str(time_signature[1])
+            if number == start_number:
+                clef = ET.SubElement(attributes, "clef")
+                ET.SubElement(clef, "sign").text = "TAB"
+                ET.SubElement(clef, "line").text = "5"
+                staff_details = ET.SubElement(attributes, "staff-details")
+                ET.SubElement(staff_details, "staff-lines").text = "6"
+                tuning = ((1, "E", 2), (2, "A", 2), (3, "D", 3), (4, "G", 3), (5, "B", 3), (6, "E", 4))
+                for line, step, octave in tuning:
+                    staff_tuning = ET.SubElement(staff_details, "staff-tuning", line=str(line))
+                    ET.SubElement(staff_tuning, "tuning-step").text = step
+                    ET.SubElement(staff_tuning, "tuning-octave").text = str(octave)
+        if number == start_number:
             direction = ET.SubElement(measure_xml, "direction", placement="above")
             direction_type = ET.SubElement(direction, "direction-type")
             metronome = ET.SubElement(direction_type, "metronome")
@@ -1200,14 +1245,19 @@ def _build_musicxml(
             ET.SubElement(metronome, "per-minute").text = str(round(tempo_bpm, 1))
             ET.SubElement(direction, "sound", tempo=str(round(tempo_bpm, 2)))
 
-        candidate = measures.get(number)
+        previous_time_signature = time_signature
+        capacity = _measure_capacity_eighths(time_signature)
         if candidate is None or not candidate.events:
-            _append_rest(measure_xml, EIGHTH_UNITS_PER_MEASURE)
+            _append_rest(measure_xml, capacity)
             continue
         cursor = 0
         for event_index, event in enumerate(candidate.events):
             if event.onset > cursor:
                 _append_rest(measure_xml, event.onset - cursor)
+            if not event.notes:
+                _append_rest(measure_xml, event.duration)
+                cursor = max(cursor, event.onset + event.duration)
+                continue
             for note_index, tab_note in enumerate(event.notes):
                 note_key = (number, event_index, tab_note.string)
                 outgoing = technique_starts.get(note_key)
@@ -1263,8 +1313,8 @@ def _build_musicxml(
                 elif tab_note.technique in {"legato", "slide", "hammer_on", "pull_off"} and not outgoing:
                     ET.SubElement(technical, "other-technical").text = tab_note.technique.replace("_", " ")
             cursor = max(cursor, event.onset + event.duration)
-        if cursor < EIGHTH_UNITS_PER_MEASURE:
-            _append_rest(measure_xml, EIGHTH_UNITS_PER_MEASURE - cursor)
+        if cursor < capacity:
+            _append_rest(measure_xml, capacity - cursor)
 
     ET.indent(score, space="  ")
     xml_body = ET.tostring(score, encoding="unicode")
@@ -1332,6 +1382,9 @@ def create_blank_tab_score(
         "start_measure": 1,
         "end_measure": measure_count,
         "estimated_tempo_bpm": round(tempo_bpm, 1),
+        "time_signature_numerator": 4,
+        "time_signature_denominator": 4,
+        "invalid_measures": list(range(1, measure_count + 1)),
         "confidence": 1.0,
         "low_confidence_glyphs": 0,
         "missing_measures": [],
@@ -1350,6 +1403,8 @@ def create_blank_tab_score(
                 "quality": 100.0,
                 "source_time": 0.0,
                 "events": [],
+                "time_signature": {"numerator": 4, "denominator": 4},
+                "validation": _measure_validation([], EIGHTH_UNITS_PER_MEASURE),
             }
             for number in measures
         ],
@@ -1453,6 +1508,8 @@ def recognize_tab_frames(
         "start_measure": start_measure,
         "end_measure": end_measure,
         "estimated_tempo_bpm": round(tempo, 1),
+        "time_signature_numerator": 4,
+        "time_signature_denominator": 4,
         "confidence": round(confidence, 3),
         "glyph_coverage": round(glyph_coverage, 3),
         "recognized_glyphs": recognized_glyphs,
@@ -1466,6 +1523,16 @@ def recognize_tab_frames(
         "polarity_counts": polarity_counts,
         "warnings": warnings,
     }
+    invalid_measures = [
+        number
+        for number, candidate in sorted(usable.items())
+        if not _measure_validation(candidate.events, EIGHTH_UNITS_PER_MEASURE)["is_complete"]
+    ]
+    summary["invalid_measures"] = invalid_measures
+    if invalid_measures:
+        warnings.append(
+            f"有 {len(invalid_measures)} 个小节尚未用音符或实体休止填满 4/4 拍，校对器会标红"
+        )
     diagnostics = {
         "summary": summary,
         "sync_suggestions": suggestions,
@@ -1496,6 +1563,8 @@ def recognize_tab_frames(
                     }
                     for event in candidate.events
                 ],
+                "time_signature": {"numerator": 4, "denominator": 4},
+                "validation": _measure_validation(candidate.events, EIGHTH_UNITS_PER_MEASURE),
             }
             for number, candidate in sorted(usable.items())
         ],
@@ -1536,6 +1605,8 @@ def recognize_tab_measure(
             }
             for event in candidate.events
         ],
+        "time_signature": {"numerator": 4, "denominator": 4},
+        "validation": _measure_validation(candidate.events, EIGHTH_UNITS_PER_MEASURE),
         "source_frame": frame.source_frame,
         "source_name": frame.path.name,
     }
@@ -1548,6 +1619,7 @@ def update_recognized_measure(
     title: str,
     measure_number: int,
     events: list[dict],
+    time_signature: tuple[int, int] | None = None,
 ) -> dict:
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     summary = diagnostics.get("summary") or {}
@@ -1555,6 +1627,14 @@ def update_recognized_measure(
     end_measure = int(summary.get("end_measure") or measure_number)
     if not start_measure <= measure_number <= end_measure:
         raise ValueError(f"小节号必须在 {start_measure}～{end_measure} 之间")
+
+    measure_rows = diagnostics.setdefault("measures", [])
+    existing = next((row for row in measure_rows if int(row.get("number") or 0) == measure_number), None)
+    raw_time_signature = (existing or {}).get("time_signature") or {}
+    numerator = int(time_signature[0] if time_signature else raw_time_signature.get("numerator") or summary.get("time_signature_numerator") or 4)
+    denominator = int(time_signature[1] if time_signature else raw_time_signature.get("denominator") or summary.get("time_signature_denominator") or 4)
+    resolved_time_signature = (numerator, denominator)
+    capacity = _measure_capacity_eighths(resolved_time_signature)
 
     def quantized_eighth(value: object, label: str, multiplier: int, grid_label: str) -> float:
         number = float(value)
@@ -1570,27 +1650,27 @@ def update_recognized_measure(
     ):
         onset = quantized_eighth(raw_event["onset_eighths"], "音符起点", 2, "十六分音符")
         duration = quantized_eighth(raw_event["duration_eighths"], "音符时值", 8, "六十四分音符")
-        if onset < 0 or onset >= EIGHTH_UNITS_PER_MEASURE:
-            raise ValueError("音符起点超出当前 4/4 小节范围")
-        if duration < 0.5 or duration > EIGHTH_UNITS_PER_MEASURE:
+        if onset < 0 or onset >= capacity:
+            raise ValueError(f"节拍起点超出当前 {numerator}/{denominator} 小节范围")
+        if duration < 0.5 or duration > capacity:
             raise ValueError("音符时值必须在十六分音符到全音符之间")
         if onset < previous_end:
             raise ValueError("音符事件不能互相重叠；同一时刻的音请放在同一个和弦事件中")
-        if onset + duration > EIGHTH_UNITS_PER_MEASURE:
-            raise ValueError("音符超出当前 4/4 小节范围")
+        if onset + duration > capacity:
+            raise ValueError(f"节拍超出当前 {numerator}/{denominator} 小节范围")
         notes = tuple(
             sorted(
-                (_tab_note_from_dict(note) for note in raw_event["notes"]),
+                (_tab_note_from_dict(note) for note in raw_event.get("notes", [])),
                 key=lambda note: note.string,
             )
         )
+        if notes and raw_event.get("rest"):
+            raise ValueError("同一个节拍不能同时是音符与休止符")
         if len({note.string for note in notes}) != len(notes):
             raise ValueError("同一个和弦事件中每根弦只能出现一次")
         normalized_events.append(TabEvent(onset, duration, notes))
         previous_end = onset + duration
 
-    measure_rows = diagnostics.setdefault("measures", [])
-    existing = next((row for row in measure_rows if int(row.get("number") or 0) == measure_number), None)
     source_time = float(existing.get("source_time") or 0) if existing else 0.0
     quality = float(existing.get("quality") or 100) if existing else 100.0
     replacement = {
@@ -1602,9 +1682,12 @@ def update_recognized_measure(
                 "onset_eighths": event.onset,
                 "duration_eighths": event.duration,
                 "notes": [_tab_note_to_dict(note) for note in event.notes],
+                **({"rest": True} if not event.notes else {}),
             }
             for event in normalized_events
         ],
+        "time_signature": {"numerator": numerator, "denominator": denominator},
+        "validation": _measure_validation(normalized_events, capacity),
     }
     if existing:
         measure_rows[measure_rows.index(existing)] = replacement
@@ -1619,7 +1702,7 @@ def update_recognized_measure(
             TabEvent(
                 float(event["onset_eighths"]),
                 float(event["duration_eighths"]),
-                tuple(_tab_note_from_dict(note) for note in event["notes"]),
+                tuple(_tab_note_from_dict(note) for note in event.get("notes", [])),
             )
             for event in row.get("events", [])
         )
@@ -1634,18 +1717,36 @@ def update_recognized_measure(
             float(row.get("quality") or 0),
             float(row.get("source_time") or 0),
             signature,
+            time_signature=(
+                int((row.get("time_signature") or {}).get("numerator") or summary.get("time_signature_numerator") or 4),
+                int((row.get("time_signature") or {}).get("denominator") or summary.get("time_signature_denominator") or 4),
+            ),
         )
 
     missing = [number for number in range(start_measure, end_measure + 1) if number not in candidates]
     summary["measure_count"] = len(candidates)
     summary["missing_measures"] = missing
+    invalid_measures = [
+        number
+        for number, candidate in sorted(candidates.items())
+        if not _measure_validation(
+            candidate.events,
+            _measure_capacity_eighths(candidate.time_signature),
+        )["is_complete"]
+    ]
+    summary["invalid_measures"] = invalid_measures
     warnings = [
         warning
         for warning in summary.get("warnings", [])
         if "个小节未获得可靠结果" not in str(warning)
+        and "个小节尚未用音符或实体休止填满" not in str(warning)
     ]
     if missing:
         warnings.append(f"有 {len(missing)} 个小节未获得可靠结果，已在导出谱中留空")
+    if invalid_measures:
+        warnings.append(
+            f"有 {len(invalid_measures)} 个小节尚未用音符或实体休止填满拍号容量，校对器会标红"
+        )
     summary["warnings"] = warnings
     diagnostics["summary"] = summary
 
@@ -1688,12 +1789,27 @@ def append_blank_tab_measure(
             "quality": 100.0,
             "source_time": 0.0,
             "events": [],
+            "time_signature": {
+                "numerator": int(summary.get("time_signature_numerator") or 4),
+                "denominator": int(summary.get("time_signature_denominator") or 4),
+            },
+            "validation": _measure_validation(
+                [],
+                _measure_capacity_eighths((
+                    int(summary.get("time_signature_numerator") or 4),
+                    int(summary.get("time_signature_denominator") or 4),
+                )),
+            ),
         }
     )
     measure_rows.sort(key=lambda row: int(row["number"]))
     summary["start_measure"] = start_measure
     summary["end_measure"] = next_number
     summary["measure_count"] = len(measure_rows)
+    summary["invalid_measures"] = sorted({
+        *(int(value) for value in summary.get("invalid_measures", [])),
+        next_number,
+    })
     diagnostics["summary"] = summary
 
     candidates: dict[int, MeasureCandidate] = {}
@@ -1703,7 +1819,7 @@ def append_blank_tab_measure(
             TabEvent(
                 float(event["onset_eighths"]),
                 float(event["duration_eighths"]),
-                tuple(_tab_note_from_dict(note) for note in event["notes"]),
+                tuple(_tab_note_from_dict(note) for note in event.get("notes", [])),
             )
             for event in row.get("events", [])
         )
@@ -1718,6 +1834,10 @@ def append_blank_tab_measure(
             float(row.get("quality") or 0),
             float(row.get("source_time") or 0),
             signature,
+            time_signature=(
+                int((row.get("time_signature") or {}).get("numerator") or summary.get("time_signature_numerator") or 4),
+                int((row.get("time_signature") or {}).get("denominator") or summary.get("time_signature_denominator") or 4),
+            ),
         )
 
     temporary_score = score_path.with_name(f".{score_path.name}.tmp")

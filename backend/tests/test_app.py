@@ -133,6 +133,32 @@ def test_manual_tab_project_supports_per_string_chords_and_appending_measures(cl
     assert "没有源视频帧" in retry.json()["detail"]
 
 
+def test_manual_tab_api_accepts_explicit_rests_and_reports_complete_bar(client: TestClient):
+    register(client)
+    project = client.post(
+        "/api/projects/manual-tab",
+        json={"title": "实体休止测试", "measure_count": 1, "tempo_bpm": 100},
+    ).json()
+
+    edited = client.patch(
+        f"/api/projects/{project['id']}/recognition/measures/1",
+        json={
+            "time_signature": {"numerator": 3, "denominator": 4},
+            "events": [
+                {"onset_eighths": 0, "duration_eighths": 2, "notes": [{"string": 1, "fret": 5}]},
+                {"onset_eighths": 2, "duration_eighths": 4, "notes": [], "rest": True},
+            ]
+        },
+    )
+
+    assert edited.status_code == 200
+    payload = edited.json()
+    assert payload["measures"][0]["time_signature"] == {"numerator": 3, "denominator": 4}
+    assert payload["measures"][0]["events"][1]["rest"] is True
+    assert payload["measures"][0]["validation"]["is_complete"] is True
+    assert payload["summary"]["invalid_measures"] == []
+
+
 def test_inspect_caches_private_cover_for_library(client: TestClient, monkeypatch):
     register(client)
     project = client.post(

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Clock3, Minus, Plus, Redo2, RefreshCw, Save, Trash2, Undo2 } from "lucide-react";
 import type { Project, RecognitionDiagnostics, RecognitionEvent, RecognitionMeasure, RecognitionNote, TabTechnique } from "../types";
 
@@ -11,24 +11,15 @@ type Props = {
   embedded?: boolean;
   onMeasureChange: (measure: number) => void;
   onDirtyChange: (dirty: boolean) => void;
-  onSave: (measure: number, events: RecognitionEvent[]) => Promise<void>;
+  onSave: (measure: number, events: RecognitionEvent[], timeSignature: { numerator: number; denominator: number }) => Promise<void>;
   onRetryRecognition: (measure: number) => Promise<RecognitionMeasure>;
   onAppendMeasure: () => Promise<RecognitionDiagnostics>;
 };
 
 type SelectedCell = { onset: number; string: number };
 type TimeSelection = { anchor: number; focus: number };
-type DotInputState = {
-  key: string;
-  time: number;
-  bases: Record<string, number>;
-  historyCommitted: boolean;
-};
 
 const GRID_STEP = 0.5;
-const GRID_SLOTS = 16;
-const MEASURE_UNITS = 8;
-const DOT_GESTURE_MS = 520;
 const DURATION_OPTIONS = [0.5, 0.75, 0.875, 1, 1.5, 1.75, 2, 3, 3.5, 4, 6, 7, 8];
 const POWER_OF_TWO_DURATIONS = [0.5, 1, 2, 4, 8];
 const TECHNIQUES: Array<{ id: TabTechnique; label: string; mark: string; shortcut: string }> = [
@@ -100,15 +91,53 @@ function beatLabel(onset: number) {
   return `${Math.floor(slot / 4) + 1}${["", "e", "&", "a"][slot % 4]}`;
 }
 
+function rhythmUnitsLabel(units: number) {
+  if (Math.abs(units - Math.round(units)) < 1e-9) return String(Math.round(units));
+  return units.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function validateMeasure(events: RecognitionEvent[], capacity: number) {
+  const ordered = [...events].sort((left, right) => left.onset_eighths - right.onset_eighths);
+  let cursor = 0;
+  let committed = 0;
+  let hasGaps = false;
+  let overflow = 0;
+  for (const event of ordered) {
+    if (event.onset_eighths > cursor + 1e-9) hasGaps = true;
+    if (event.onset_eighths < cursor - 1e-9) overflow = Math.max(overflow, cursor - event.onset_eighths);
+    cursor = Math.max(cursor, event.onset_eighths + event.duration_eighths);
+    committed += event.duration_eighths;
+  }
+  if (cursor < capacity - 1e-9) hasGaps = true;
+  overflow = Math.max(overflow, cursor - capacity, committed - capacity, 0);
+  const missing = Math.max(0, capacity - committed);
+  return {
+    capacity,
+    committed,
+    missing,
+    overflow,
+    hasGaps,
+    complete: !hasGaps && overflow <= 1e-9 && Math.abs(committed - capacity) <= 1e-9
+  };
+}
+
 export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, retrying, embedded = false, onMeasureChange, onDirtyChange, onSave, onRetryRecognition, onAppendMeasure }: Props) {
   const startMeasure = diagnostics.summary.start_measure ?? diagnostics.measures[0]?.number ?? 1;
   const endMeasure = diagnostics.summary.end_measure ?? diagnostics.measures.at(-1)?.number ?? startMeasure;
   const canRetryRecognition = diagnostics.summary.engine === "tab_cv_tesseract" && diagnostics.frames.length > 0;
   const currentMeasure = diagnostics.measures.find((item) => item.number === measureNumber);
+  const loadedTimeSignature = currentMeasure?.time_signature ?? {
+    numerator: diagnostics.summary.time_signature_numerator ?? 4,
+    denominator: diagnostics.summary.time_signature_denominator ?? 4
+  };
+  const [timeSignature, setTimeSignature] = useState(loadedTimeSignature);
+  const measureUnits = timeSignature.numerator * 8 / timeSignature.denominator;
+  const gridSlots = Math.max(1, Math.round(measureUnits / GRID_STEP));
   const [events, setEvents] = useState<RecognitionEvent[]>(() => cloneEvents(currentMeasure));
   const [dirty, setDirty] = useState(false);
   const [selectedCell, setSelectedCell] = useState<SelectedCell>({ onset: 0, string: 1 });
   const [timeSelection, setTimeSelection] = useState<TimeSelection>({ anchor: 0, focus: 0 });
+  const [discreteOnsets, setDiscreteOnsets] = useState<number[]>([]);
   const [entryDuration, setEntryDuration] = useState(1);
   const [armedTechnique, setArmedTechnique] = useState<TabTechnique | null>(null);
   const [editStatus, setEditStatus] = useState("方向键逐格移动；数字只写入当前这一根弦");
@@ -116,7 +145,6 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
   const [redoStack, setRedoStack] = useState<RecognitionEvent[][]>([]);
   const [fretDraft, setFretDraft] = useState("");
   const digitBufferRef = useRef<{ key: string; value: string; time: number } | null>(null);
-  const dotInputRef = useRef<DotInputState | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const saveInFlightRef = useRef(false);
   const dragSelectionRef = useRef<{ pointerId: number; anchor: number } | null>(null);
@@ -138,11 +166,12 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
       setTimeSelection({ anchor: firstOnset, focus: firstOnset });
       setEntryDuration(nextEvents[0]?.duration_eighths ?? 1);
       setEditStatus("方向键逐格移动；数字只写入当前这一根弦");
+      setTimeSignature(loadedTimeSignature);
     }
     setUndoStack([]);
     setRedoStack([]);
+    setDiscreteOnsets([]);
     digitBufferRef.current = null;
-    dotInputRef.current = null;
   }, [measureNumber, diagnostics]);
 
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
@@ -173,14 +202,18 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
   const selectedEnd = Math.max(timeSelection.anchor, timeSelection.focus);
   const selectedEventIndexes = events
     .map((event, index) => ({ event, index }))
-    .filter(({ event }) => selectedStart <= event.onset_eighths && event.onset_eighths <= selectedEnd)
+    .filter(({ event }) => (
+      selectedStart <= event.onset_eighths && event.onset_eighths <= selectedEnd
+    ) || discreteOnsets.includes(event.onset_eighths))
     .map(({ index }) => index);
   const selectedEvents = selectedEventIndexes.map((index) => events[index]);
-  const selectionVisualEnd = selectedEvents.length
-    ? Math.max(selectedEnd, ...selectedEvents.map((event) => event.onset_eighths + event.duration_eighths - GRID_STEP))
+  const rangeEvents = events.filter((event) => selectedStart <= event.onset_eighths && event.onset_eighths <= selectedEnd);
+  const selectionVisualEnd = rangeEvents.length
+    ? Math.max(selectedEnd, ...rangeEvents.map((event) => event.onset_eighths + event.duration_eighths - GRID_STEP))
     : selectedEnd;
   const selectedSpan = selectedEnd - selectedStart + GRID_STEP;
   const selectedDuration = selectedEvents.reduce((total, event) => total + event.duration_eighths, 0);
+  const measureValidation = validateMeasure(events, measureUnits);
 
   useEffect(() => {
     setFretDraft(selectedNote ? String(selectedNote.fret) : "");
@@ -188,17 +221,10 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
 
   function markChanged(nextEvents: RecognitionEvent[]) {
     if (busy || saveInFlightRef.current) return;
-    dotInputRef.current = null;
     const normalized = copyEvents(nextEvents).sort((left, right) => left.onset_eighths - right.onset_eighths);
     if (sameEvents(events, normalized)) return;
     setUndoStack((current) => [...current.slice(-99), copyEvents(events)]);
     setRedoStack([]);
-    setEvents(normalized);
-    setDirty(!sameEvents(normalized, baselineRef.current));
-  }
-
-  function replaceChangedWithoutHistory(nextEvents: RecognitionEvent[]) {
-    const normalized = copyEvents(nextEvents).sort((left, right) => left.onset_eighths - right.onset_eighths);
     setEvents(normalized);
     setDirty(!sameEvents(normalized, baselineRef.current));
   }
@@ -217,7 +243,6 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     setEvents(normalized);
     setDirty(!sameEvents(normalized, baselineRef.current));
     digitBufferRef.current = null;
-    dotInputRef.current = null;
   }
 
   function undo() {
@@ -241,10 +266,10 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
   }
 
   function selectCell(onset: number, string: number, extend = false) {
-    const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP);
+    const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, measureUnits - GRID_STEP);
     const targetString = clamp(string, 1, 6);
-    dotInputRef.current = null;
     setSelectedCell({ onset: targetOnset, string: targetString });
+    setDiscreteOnsets([]);
     setTimeSelection((current) => extend
       ? { ...current, focus: targetOnset }
       : { anchor: targetOnset, focus: targetOnset });
@@ -255,9 +280,22 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
 
   function beginCellSelection(event: React.PointerEvent<HTMLButtonElement>, onset: number, string: number) {
     if (busy || saveInFlightRef.current) return;
-    const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP);
+    const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, measureUnits - GRID_STEP);
+    if (event.ctrlKey || event.metaKey) {
+      setDiscreteOnsets((current) => {
+        const base = current.length ? current : [timeSelection.focus];
+        return base.includes(targetOnset)
+          ? base.filter((value) => value !== targetOnset)
+          : [...base, targetOnset];
+      });
+      setSelectedCell({ onset: targetOnset, string });
+      setTimeSelection({ anchor: targetOnset, focus: targetOnset });
+      window.requestAnimationFrame(() => gridRef.current?.focus());
+      event.preventDefault();
+      return;
+    }
     const anchor = event.shiftKey ? timeSelection.anchor : targetOnset;
-    dotInputRef.current = null;
+    setDiscreteOnsets([]);
     dragSelectionRef.current = { pointerId: event.pointerId, anchor };
     gridRef.current?.setPointerCapture(event.pointerId);
     setSelectedCell({ onset: targetOnset, string });
@@ -290,14 +328,14 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     for (let index = 0; index < ordered.length; index += 1) {
       const event = ordered[index];
       const next = ordered[index + 1];
-      if (event.onset_eighths < 0 || event.onset_eighths + event.duration_eighths > MEASURE_UNITS) return false;
+      if (event.duration_eighths < GRID_STEP || event.onset_eighths < 0 || event.onset_eighths + event.duration_eighths > measureUnits) return false;
       if (next && event.onset_eighths + event.duration_eighths > next.onset_eighths) return false;
     }
     return true;
   }
 
   function setCellFret(onset: number, string: number, fret: number) {
-    const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP);
+    const targetOnset = clamp(Math.round(onset / GRID_STEP) * GRID_STEP, 0, measureUnits - GRID_STEP);
     const eventIndex = events.findIndex((event) => event.onset_eighths === targetOnset);
     let splitSustain = false;
     let shortenedDuration = false;
@@ -307,7 +345,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
         ? events[eventIndex].notes.map((note, index) => index === noteIndex ? { ...note, fret } : note)
         : [...events[eventIndex].notes, { string, fret, ...(armedTechnique ? { technique: armedTechnique } : {}) }]
             .sort((left, right) => left.string - right.string);
-      markChanged(events.map((event, index) => index === eventIndex ? { ...event, notes } : event));
+      markChanged(events.map((event, index) => index === eventIndex ? { ...event, notes, rest: false } : event));
     } else {
       const coveringIndex = events.findIndex(
         (event) => event.onset_eighths < targetOnset
@@ -321,8 +359,8 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
       splitSustain = coveringIndex >= 0;
       const nextOnset = baseEvents
         .filter((event) => event.onset_eighths > targetOnset)
-        .reduce((minimum, event) => Math.min(minimum, event.onset_eighths), MEASURE_UNITS);
-      const availableDuration = Math.min(nextOnset, MEASURE_UNITS) - targetOnset;
+        .reduce((minimum, event) => Math.min(minimum, event.onset_eighths), measureUnits);
+      const availableDuration = Math.min(nextOnset, measureUnits) - targetOnset;
       if (availableDuration < GRID_STEP) {
         setEditStatus("这个位置没有可用的十六分时值，请先移动或删除后一个音");
         return;
@@ -353,11 +391,27 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     if (selectedEventIndex < 0) return;
     const deleted = selectedNote;
     const remaining = events[selectedEventIndex].notes.filter((note) => note.string !== selectedCell.string);
-    markChanged(remaining.length
-      ? events.map((event, index) => index === selectedEventIndex ? { ...event, notes: remaining } : event)
-      : events.filter((_, index) => index !== selectedEventIndex));
+    markChanged(events.map((event, index) => index === selectedEventIndex
+      ? remaining.length ? { ...event, notes: remaining } : { ...event, notes: [], rest: true }
+      : event));
     digitBufferRef.current = null;
     if (deleted) setEditStatus(`已删除 ${beatLabel(selectedCell.onset)} 的 ${selectedCell.string} 弦 ${deleted.fret} 品`);
+  }
+
+  function deleteSelectedBeats() {
+    if (!selectedEventIndexes.length) return;
+    const selected = new Set(selectedEventIndexes);
+    const removedDuration = selectedEvents.reduce((total, event) => total + event.duration_eighths, 0);
+    const firstOnset = Math.min(...selectedEvents.map((event) => event.onset_eighths));
+    const lastEnd = Math.max(...selectedEvents.map((event) => event.onset_eighths + event.duration_eighths));
+    const nextEvents = events
+      .filter((_, index) => !selected.has(index))
+      .map((event) => event.onset_eighths >= lastEnd ? { ...event, onset_eighths: event.onset_eighths - removedDuration } : event);
+    markChanged(nextEvents);
+    setSelectedCell((current) => ({ ...current, onset: firstOnset }));
+    setTimeSelection({ anchor: firstOnset, focus: firstOnset });
+    setDiscreteOnsets([]);
+    setEditStatus(`已删除 ${selected.size} 个节拍并向左收拢；小节尾部会显示透明休止`);
   }
 
   function applyTechnique(technique: TabTechnique) {
@@ -391,65 +445,79 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     setCellFret(selectedCell.onset, selectedCell.string, Number(value));
   }
 
+  function reflowSelectedDurations(resolveDuration: (event: RecognitionEvent) => number) {
+    const selectedOnsets = new Set(selectedEventIndexes.map((index) => events[index].onset_eighths));
+    const nextSelectedOnsets: number[] = [];
+    let shift = 0;
+    const nextEvents = [...events]
+      .sort((left, right) => left.onset_eighths - right.onset_eighths)
+      .map((event) => {
+        const onset = event.onset_eighths + shift;
+        if (!selectedOnsets.has(event.onset_eighths)) return { ...event, onset_eighths: onset };
+        const nextDuration = resolveDuration(event);
+        nextSelectedOnsets.push(onset);
+        shift += nextDuration - event.duration_eighths;
+        return { ...event, onset_eighths: onset, duration_eighths: nextDuration };
+      });
+    return { nextEvents, nextSelectedOnsets };
+  }
+
   function applyDuration(duration: number) {
     setEntryDuration(duration);
     if (!selectedEventIndexes.length) {
       setEditStatus(`新输入音符将使用 ${durationLabel(duration)}`);
       return;
     }
-    const selected = new Set(selectedEventIndexes);
-    const nextEvents = events.map((event, index) => selected.has(index) ? { ...event, duration_eighths: duration } : event);
+    const { nextEvents, nextSelectedOnsets } = reflowSelectedDurations(() => duration);
     if (!validEvents(nextEvents)) {
       setEditStatus("这个时值会与后一个音重叠或越过小节线，未应用");
       return;
     }
     markChanged(nextEvents);
-    setEditStatus(`已把 ${selected.size} 个节拍改为 ${durationLabel(duration)}`);
+    if (nextSelectedOnsets.length) {
+      if (discreteOnsets.length) {
+        setDiscreteOnsets(nextSelectedOnsets);
+        setTimeSelection({ anchor: nextSelectedOnsets[0], focus: nextSelectedOnsets[0] });
+      } else setTimeSelection({ anchor: Math.min(...nextSelectedOnsets), focus: Math.max(...nextSelectedOnsets) });
+      setSelectedCell((current) => ({ ...current, onset: nextSelectedOnsets[0] }));
+    }
+    setEditStatus(`已把 ${selectedEventIndexes.length} 个节拍改为 ${durationLabel(duration)}，后续节拍已随之重排`);
   }
 
-  function applyDots() {
+  function applyDots(double = false) {
     if (busy || saveInFlightRef.current) return;
     if (!selectedEventIndexes.length) {
-      dotInputRef.current = null;
       setEditStatus("请先选择一个或多个音符节拍，再按小键盘 .");
       return;
     }
-    const key = `${measureNumber}:${selectedEventIndexes.map((index) => events[index].onset_eighths).join(",")}`;
-    const now = Date.now();
-    const previous = dotInputRef.current;
-    const continuing = Boolean(previous && previous.key === key && now - previous.time <= DOT_GESTURE_MS);
-    const bases = continuing && previous
-      ? previous.bases
-      : Object.fromEntries(selectedEventIndexes.map((index) => {
-          const event = events[index];
-          return [String(event.onset_eighths), durationShape(event.duration_eighths)?.base];
-        }).filter((entry): entry is [string, number] => entry[1] !== undefined));
-    if (Object.keys(bases).length !== selectedEventIndexes.length) {
-      dotInputRef.current = null;
+    const shapes = selectedEvents.map((event) => durationShape(event.duration_eighths));
+    if (shapes.some((shape) => !shape)) {
       setEditStatus("所选节拍含非标准时值，请先用 + / − 改成标准音符");
       return;
     }
-    const dots = continuing ? 2 : 1;
-    const factor = dots === 2 ? 1.75 : 1.5;
-    const selected = new Set(selectedEventIndexes);
-    const nextEvents = events.map((event, index) => selected.has(index)
-      ? { ...event, duration_eighths: bases[String(event.onset_eighths)] * factor }
-      : event);
+    const dots = double ? 2 : shapes.every((shape) => shape?.dots === 1) ? 0 : 1;
+    const factor = dots === 2 ? 1.75 : dots === 1 ? 1.5 : 1;
+    const bases = new Map(selectedEvents.map((event, index) => [event.onset_eighths, shapes[index]!.base]));
+    const { nextEvents, nextSelectedOnsets } = reflowSelectedDurations((event) => bases.get(event.onset_eighths)! * factor);
     if (!validEvents(nextEvents)) {
-      dotInputRef.current = null;
       setEditStatus(`${dots === 2 ? "双附点" : "附点"}会与后一个音重叠或越过小节线，未应用`);
       return;
     }
-    const changed = !sameEvents(events, nextEvents);
-    if (continuing && previous?.historyCommitted) replaceChangedWithoutHistory(nextEvents);
-    else if (changed) markChanged(nextEvents);
-    const firstDuration = nextEvents[selectedEventIndexes[0]]?.duration_eighths;
+    markChanged(nextEvents);
+    if (nextSelectedOnsets.length) {
+      if (discreteOnsets.length) {
+        setDiscreteOnsets(nextSelectedOnsets);
+        setTimeSelection({ anchor: nextSelectedOnsets[0], focus: nextSelectedOnsets[0] });
+      } else setTimeSelection({ anchor: Math.min(...nextSelectedOnsets), focus: Math.max(...nextSelectedOnsets) });
+      setSelectedCell((current) => ({ ...current, onset: nextSelectedOnsets[0] }));
+    }
+    const firstDuration = nextEvents.find((event) => event.onset_eighths === selectedStart)?.duration_eighths;
     if (firstDuration !== undefined) setEntryDuration(firstDuration);
-    if (continuing) dotInputRef.current = null;
-    else dotInputRef.current = { key, time: now, bases, historyCommitted: changed };
     setEditStatus(dots === 2
-      ? `已把 ${selected.size} 个节拍设为双附点；这两次按键合并为一次撤销`
-      : `已把 ${selected.size} 个节拍设为单附点；快速再按一次 . 可设双附点`);
+      ? `已把 ${selectedEventIndexes.length} 个节拍设为双附点`
+      : dots === 1
+        ? `已把 ${selectedEventIndexes.length} 个节拍设为单附点；再按 . 可取消`
+        : `已移除 ${selectedEventIndexes.length} 个节拍的附点`);
   }
 
   function adjustDuration(shorter: boolean) {
@@ -461,18 +529,24 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
 
   function makeSelectionRest() {
     if (!selectedEventIndexes.length) {
-      setEditStatus("当前已经是休止位置");
+      const nextOnset = events
+        .filter((event) => event.onset_eighths > selectedCell.onset)
+        .reduce((minimum, event) => Math.min(minimum, event.onset_eighths), measureUnits);
+      const duration = Math.min(entryDuration, nextOnset - selectedCell.onset);
+      if (duration < GRID_STEP) return setEditStatus("当前拍位没有足够空间写入休止符");
+      markChanged([...events, { onset_eighths: selectedCell.onset, duration_eighths: duration, notes: [], rest: true }]);
+      setEditStatus(`已把 ${beatLabel(selectedCell.onset)} 的透明休止符写成实体`);
       return;
     }
     const selected = new Set(selectedEventIndexes);
-    markChanged(events.filter((_, index) => !selected.has(index)));
+    markChanged(events.map((event, index) => selected.has(index) ? { ...event, notes: [], rest: true } : event));
     digitBufferRef.current = null;
     setEditStatus(`已把所选 ${selectedEvents.length} 个节拍（${durationLabel(selectedDuration)}）设为休止`);
   }
 
   function moveSelectedEvent(horizontal: number) {
     if (selectedEventIndex < 0) return setEditStatus("当前空位没有可移动的音符");
-    const target = clamp(events[selectedEventIndex].onset_eighths + horizontal * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP);
+    const target = clamp(events[selectedEventIndex].onset_eighths + horizontal * GRID_STEP, 0, measureUnits - GRID_STEP);
     const nextEvents = events.map((event, index) => index === selectedEventIndex ? { ...event, onset_eighths: target } : event);
     if (!validEvents(nextEvents)) return setEditStatus("目标位置会与其他音符重叠，未移动");
     markChanged(nextEvents);
@@ -493,12 +567,12 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
   }
 
   function moveSelection(horizontal: number, vertical: number, extend = false) {
-    const onset = horizontal
-      ? clamp(selectedCell.onset + horizontal * GRID_STEP, 0, MEASURE_UNITS - GRID_STEP)
-      : selectedCell.onset;
+    const currentEvent = events.find((event) => event.onset_eighths === selectedCell.onset);
+    const horizontalStep = currentEvent?.duration_eighths ?? entryDuration;
+    const onset = horizontal ? clamp(selectedCell.onset + horizontal * horizontalStep, 0, measureUnits - GRID_STEP) : selectedCell.onset;
     const string = clamp(selectedCell.string + vertical, 1, 6);
-    dotInputRef.current = null;
     setSelectedCell({ onset, string });
+    if (!extend) setDiscreteOnsets([]);
     setTimeSelection((current) => extend && horizontal
       ? { ...current, focus: onset }
       : { anchor: onset, focus: onset });
@@ -545,7 +619,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     }
     if (event.code === "NumpadDecimal" || event.key === "Decimal" || event.key === ".") {
       handle();
-      applyDots();
+      applyDots(event.ctrlKey || event.metaKey);
       return;
     }
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
@@ -574,11 +648,13 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     }
     if (event.key === "Delete" || event.key === "Backspace") {
       handle();
-      deleteSelectedNote();
+      if (event.shiftKey) deleteSelectedBeats();
+      else deleteSelectedNote();
       return;
     }
     if (event.key === "Enter") {
       handle();
+      if (selectedEventIndex < 0) makeSelectionRest();
       moveSelection(1, 0);
       return;
     }
@@ -625,7 +701,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     if (!dirty || busy || saveInFlightRef.current) return;
     saveInFlightRef.current = true;
     try {
-      await onSave(measureNumber, events);
+      await onSave(measureNumber, events, timeSignature);
       baselineRef.current = copyEvents(events);
       setDirty(false);
       setUndoStack([]);
@@ -683,9 +759,9 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
 
   function addEvent() {
     const lastEnd = events.reduce((end, event) => Math.max(end, event.onset_eighths + event.duration_eighths), 0);
-    if (lastEnd >= MEASURE_UNITS) return;
-    const duration = Math.min(entryDuration, MEASURE_UNITS - lastEnd);
-    markChanged([...events, { onset_eighths: lastEnd, duration_eighths: duration, notes: [{ string: selectedCell.string, fret: 0 }] }]);
+    if (lastEnd >= measureUnits) return;
+    const duration = Math.min(entryDuration, measureUnits - lastEnd);
+    markChanged([...events, { onset_eighths: lastEnd, duration_eighths: duration, notes: [], rest: true }]);
     setSelectedCell({ onset: lastEnd, string: selectedCell.string });
     setTimeSelection({ anchor: lastEnd, focus: lastEnd });
   }
@@ -694,7 +770,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
     const used = new Set(events[eventIndex].notes.map((note) => note.string));
     const nextString = [1, 2, 3, 4, 5, 6].find((value) => !used.has(value));
     if (!nextString) return;
-    updateEvent(eventIndex, { notes: [...events[eventIndex].notes, { string: nextString, fret: 0 }] });
+    updateEvent(eventIndex, { notes: [...events[eventIndex].notes, { string: nextString, fret: 0 }], rest: false });
   }
 
   return (
@@ -751,7 +827,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
                   <button type="button" key={value} className={entryDuration === value ? "active" : ""} onClick={() => applyDuration(value)} aria-pressed={entryDuration === value}>{durationLabel(value)}</button>
                 ))}
               </div>
-              <button type="button" className={`dot-command ${selectedEvents.length && selectedEvents.every((item) => (durationShape(item.duration_eighths)?.dots ?? 0) > 0) ? "active" : ""}`} onClick={applyDots} title="单击设附点，快速双击设双附点；快捷键为小键盘 ."><b>{selectedEvents.length && selectedEvents.every((item) => durationShape(item.duration_eighths)?.dots === 2) ? "··" : "·"}</b><span>附点</span><kbd>.</kbd></button>
+              <button type="button" className={`dot-command ${selectedEvents.length && selectedEvents.every((item) => (durationShape(item.duration_eighths)?.dots ?? 0) > 0) ? "active" : ""}`} onClick={() => applyDots(false)} title=". 切换单附点；Ctrl/⌘ + . 设双附点"><b>{selectedEvents.length && selectedEvents.every((item) => durationShape(item.duration_eighths)?.dots === 2) ? "··" : "·"}</b><span>附点</span><kbd>.</kbd></button>
               <button type="button" className="rest-command" onClick={makeSelectionRest}><b>𝄽</b><span>休止</span><kbd>R</kbd></button>
               {canRetryRecognition && <button type="button" className="retry-measure-command" disabled={busy || retrying} onClick={() => void retryMeasureRecognition()}><RefreshCw size={13} className={retrying ? "spin" : ""} /><span>{retrying ? "识别中" : "重识别本小节"}</span></button>}
             </div>
@@ -759,6 +835,21 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
               <span>弦</span>
               {[1, 2, 3, 4, 5, 6].map((string) => <button type="button" key={string} className={selectedCell.string === string ? "active" : ""} onClick={() => { setSelectedCell((current) => ({ ...current, string })); window.requestAnimationFrame(() => gridRef.current?.focus()); }} aria-pressed={selectedCell.string === string}>{string}</button>)}
               <small>{selectedEvents.length ? `已选 ${selectedEvents.length} 个节拍 · ${durationLabel(selectedDuration)}` : selectedSpan > GRID_STEP ? `已框选 ${selectedSpan}/8` : beatLabel(selectedCell.onset)}</small>
+            </div>
+            <div className={`measure-capacity-status ${measureValidation.complete ? "complete" : "invalid"}`} role="status">
+              <label aria-label="小节拍号">
+                <select value={timeSignature.numerator} onChange={(event) => { setTimeSignature((current) => ({ ...current, numerator: Number(event.target.value) })); setDirty(true); }}>
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((value) => <option value={value} key={value}>{value}</option>)}
+                </select>
+                <i>/</i>
+                <select value={timeSignature.denominator} onChange={(event) => { setTimeSignature((current) => ({ ...current, denominator: Number(event.target.value) })); setDirty(true); }}>
+                  {[2, 4, 8, 16].map((value) => <option value={value} key={value}>{value}</option>)}
+                </select>
+              </label>
+              <span>已填 {rhythmUnitsLabel(measureValidation.committed)}/{rhythmUnitsLabel(measureValidation.capacity)} 个八分单位</span>
+              {measureValidation.complete
+                ? <b>拍数完整</b>
+                : <b>{measureValidation.overflow > 0 ? `超出 ${rhythmUnitsLabel(measureValidation.overflow)}` : `还缺 ${rhythmUnitsLabel(measureValidation.missing)}`} · 小节暂不可定稿</b>}
             </div>
             <div className="cell-entry-controls">
               <form onSubmit={submitFret}>
@@ -775,12 +866,13 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
               </div>
             </div>
             <div
-              className="tab-entry-grid"
+              className={`tab-entry-grid ${measureValidation.complete ? "measure-complete" : "measure-invalid"}`}
+              style={{ "--grid-slots": gridSlots } as CSSProperties}
               ref={gridRef}
               tabIndex={0}
               role="grid"
               aria-rowcount={6}
-              aria-colcount={GRID_SLOTS}
+              aria-colcount={gridSlots}
               aria-activedescendant={`tab-cell-${measureNumber}-${selectedCell.string}-${Math.round(selectedCell.onset / GRID_STEP)}`}
               data-shortcut-scope="review"
               onKeyDown={handleGridKeyDown}
@@ -790,21 +882,23 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
               aria-label="十六分音符六线 TAB 键盘编辑器；上下换弦，左右逐格移动"
             >
               <div className="tab-corner">TAB</div>
-              {Array.from({ length: GRID_SLOTS }, (_, slot) => {
+              {Array.from({ length: gridSlots }, (_, slot) => {
                 const onset = slot * GRID_STEP;
-                return <div className={`tab-beat-label ${selectedStart <= onset && onset <= selectionVisualEnd ? "time-selected" : ""}`} key={`beat-${slot}`}>{beatLabel(onset)}</div>;
+                return <div className={`tab-beat-label ${(selectedStart <= onset && onset <= selectionVisualEnd) || discreteOnsets.includes(onset) ? "time-selected" : ""}`} key={`beat-${slot}`}>{beatLabel(onset)}</div>;
               })}
               {Array.from({ length: 6 }, (_, row) => row + 1).map((string) => (
                 <div className="tab-string-row" key={`string-${string}`}>
                   <span className="tab-string-label">{string}</span>
-                  {Array.from({ length: GRID_SLOTS }, (_, slot) => {
+                  {Array.from({ length: gridSlots }, (_, slot) => {
                     const onset = slot * GRID_STEP;
                     const exactEvent = events.find((event) => event.onset_eighths === onset);
                     const coveringEvent = events.find((event) => event.onset_eighths < onset && onset < event.onset_eighths + event.duration_eighths);
                     const note = exactEvent?.notes.find((item) => item.string === string);
                     const technique = note?.technique ? TECHNIQUES.find((item) => item.id === note.technique) : undefined;
                     const selected = selectedCell.onset === onset && selectedCell.string === string;
-                    const timeSelected = selectedStart <= onset && onset <= selectionVisualEnd;
+                    const timeSelected = (selectedStart <= onset && onset <= selectionVisualEnd) || discreteOnsets.includes(onset);
+                    const explicitRest = Boolean(exactEvent?.rest || (exactEvent && exactEvent.notes.length === 0));
+                    const ghostRest = selected && !exactEvent && !coveringEvent;
                     return (
                       <button
                         type="button"
@@ -814,12 +908,14 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
                         data-grid-string={string}
                         role="gridcell"
                         aria-selected={selected}
-                        className={`${selected ? "selected" : ""} ${timeSelected ? "time-selected" : ""} ${note ? "has-note" : ""} ${coveringEvent ? "sustain-cell" : ""}`}
+                        className={`${selected ? "selected" : ""} ${timeSelected ? "time-selected" : ""} ${note ? "has-note" : ""} ${explicitRest ? "has-rest" : ""} ${ghostRest ? "ghost-position" : ""} ${coveringEvent ? "sustain-cell" : ""}`}
                         onPointerDown={(event) => beginCellSelection(event, onset, string)}
                         onClick={(event) => { if (event.detail === 0) selectCell(onset, string, event.shiftKey); }}
                         aria-label={`${string} 弦，${beatLabel(onset)} 十六分位置${note ? `，${note.fret} 品` : coveringEvent ? "，延音范围" : "，空位"}`}
                       >
                         {note && <><b>{note.fret}</b>{technique && <i>{technique.mark}</i>}</>}
+                        {explicitRest && string === 3 && <span className="explicit-rest" aria-hidden="true">𝄽</span>}
+                        {ghostRest && <><span className="ghost-rest" aria-hidden="true">𝄽</span><span className="entry-cursor" aria-hidden="true" /></>}
                       </button>
                     );
                   })}
@@ -827,7 +923,7 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
               ))}
             </div>
             <div className="grid-edit-status" role="status" aria-live="polite">{editStatus}</div>
-            <div className="keyboard-hints"><span><kbd>0–9</kbd> 当前弦品位</span><span><kbd>小键盘 . ×1/×2</kbd> 附点 / 双附点</span><span><kbd>↑↓</kbd> 换弦</span><span><kbd>←→</kbd> 逐十六分移动</span><span><kbd>Shift ←→</kbd> 扩展选区</span><span><kbd>Alt ↑↓←→</kbd> 移动音符</span><span><kbd>+ / −</kbd> 缩短 / 延长</span><span><kbd>Del</kbd> 仅删当前弦</span><span><kbd>Ctrl Z</kbd> 撤销</span><span><kbd>Ctrl S</kbd> 保存</span></div>
+            <div className="keyboard-hints"><span><kbd>0–9</kbd> 当前弦品位</span><span><kbd>.</kbd> 单附点开关</span><span><kbd>Ctrl .</kbd> 双附点</span><span><kbd>Enter</kbd> 实体休止并前进</span><span><kbd>↑↓</kbd> 换弦</span><span><kbd>←→</kbd> 按当前时值前后移动</span><span><kbd>Shift ←→</kbd> 连续多选</span><span><kbd>Ctrl 点击</kbd> 离散多选</span><span><kbd>+ / −</kbd> 缩短 / 延长</span><span><kbd>Del</kbd> 本弦变休止</span><span><kbd>Shift Del</kbd> 删除并收拢</span><span><kbd>Ctrl S</kbd> 保存</span></div>
           </div>
         </div>
 
@@ -837,11 +933,12 @@ export function ScoreReviewPanel({ project, diagnostics, measureNumber, busy, re
             {events.length ? events.map((event, eventIndex) => (
               <article className="event-editor" key={`${measureNumber}-${eventIndex}`}>
                 <header><strong>事件 {eventIndex + 1}</strong><div>
-                  <label><span>起点</span><select value={event.onset_eighths} onChange={(change) => updateEvent(eventIndex, { onset_eighths: Number(change.target.value) })}>{Array.from({ length: GRID_SLOTS }, (_, slot) => { const value = slot * GRID_STEP; return <option value={value} key={value}>{beatLabel(value)}</option>; })}</select></label>
+                  <label><span>起点</span><select value={event.onset_eighths} onChange={(change) => updateEvent(eventIndex, { onset_eighths: Number(change.target.value) })}>{Array.from({ length: gridSlots }, (_, slot) => { const value = slot * GRID_STEP; return <option value={value} key={value}>{beatLabel(value)}</option>; })}</select></label>
                   <label><span>时值</span><select value={event.duration_eighths} onChange={(change) => updateEvent(eventIndex, { duration_eighths: Number(change.target.value) })}>{DURATION_OPTIONS.map((value) => <option value={value} key={value}>{durationLabel(value)}</option>)}</select></label>
                   <button type="button" className="event-delete" onClick={() => markChanged(events.filter((_, index) => index !== eventIndex))} aria-label={`删除事件 ${eventIndex + 1}`}><Trash2 size={13} /></button>
                 </div></header>
                 <div className="note-editor-grid">
+                  {!event.notes.length && <div className="explicit-rest-editor">实体休止符 · {durationLabel(event.duration_eighths)}</div>}
                   {event.notes.map((note, noteIndex) => (
                     <div className="note-editor" key={`${eventIndex}-${noteIndex}`}>
                       <label><span>弦</span><input type="number" min="1" max="6" value={note.string} onChange={(change) => updateNote(eventIndex, noteIndex, { string: Number(change.target.value) })} /></label>

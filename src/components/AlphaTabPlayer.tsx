@@ -110,13 +110,6 @@ type HistoryEntry = {
   dirtyRecognitionMeasures: number[];
 };
 
-type DotGestureState = {
-  key: string;
-  time: number;
-  entry: HistoryEntry;
-  historyCommitted: boolean;
-};
-
 type VideoSyncAnchor = { tick: number; timeSeconds: number };
 type PlaybackPosition = { tick: number; endTick: number; endTime: number };
 type RestPlan = {
@@ -132,7 +125,6 @@ const WAV_SAMPLE_RATE = 44_100;
 const MAX_WAV_DURATION_MS = 6 * 60 * 1000;
 const EIGHTH_NOTE_TICKS = 480;
 const MEASURE_EIGHTHS = 8;
-const DOT_GESTURE_MS = 520;
 const DIRECT_DURATIONS = [8, 4, 2, 1, 0.5] as const;
 
 const EDIT_COMMANDS: EditCommand[] = [
@@ -636,7 +628,6 @@ export function AlphaTabPlayer({
   const dirtyRecognitionMeasuresRef = useRef(new Set<number>());
   const digitBufferRef = useRef<{ value: string; time: number } | null>(null);
   const digitHistoryEntryRef = useRef<HistoryEntry | null>(null);
-  const dotGestureRef = useRef<DotGestureState | null>(null);
   const historyBaseDirtyRef = useRef(false);
   const midiRebuildTimerRef = useRef<number | null>(null);
   const lastPlaybackPositionRef = useRef<PlaybackPosition>({ tick: 0, endTick: 0, endTime: 0 });
@@ -767,7 +758,6 @@ export function AlphaTabPlayer({
     setSelectedIds(next.map((note) => note.id));
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
-    dotGestureRef.current = null;
     if (anchor) {
       const measure = noteMeasure(anchor, recognitionRef.current);
       setFocusedMeasure(measure);
@@ -1139,7 +1129,6 @@ export function AlphaTabPlayer({
     const entry = historyEntry(command.label, selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
-    dotGestureRef.current = null;
     const recognitionTargets = (command.requiresPair ? [selected[0]] : selected).map((note) => ({
       note,
       target: recognitionDraftRef.current ? recognitionNote(note) : null
@@ -1226,7 +1215,6 @@ export function AlphaTabPlayer({
     if (recognitionDraftRef.current && [...recognitionTargets.values()].some((target) => !target)) {
       return setEditStatus("这个音符无法安全映射回保存草稿；请在已展开的六线网格中输入");
     }
-    dotGestureRef.current = null;
     const now = Date.now();
     const previous = digitBufferRef.current;
     const continuing = Boolean(previous && digitHistoryEntryRef.current && now - previous.time < 900);
@@ -1269,7 +1257,6 @@ export function AlphaTabPlayer({
     if (!selected.length) return setEditStatus("请先选择六线谱音符");
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
-    dotGestureRef.current = null;
     const selectedSet = new Set(selected);
     const proposals = new Map<alphaTab.model.Note, { originalString: number; nextString: number; nextFret: number }>();
     for (const note of selected) {
@@ -1405,7 +1392,6 @@ export function AlphaTabPlayer({
     const entry = historyEntry("音符时值", selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
-    dotGestureRef.current = null;
     for (const beat of beats) {
       beat.duration = alphaDuration(eighths);
       beat.dots = 0;
@@ -1417,27 +1403,21 @@ export function AlphaTabPlayer({
     commitEdit(`时值 ${directDurationLabel(eighths)}`, entry, selected);
   }
 
-  function applySelectedDots() {
+  function applySelectedDots(double = false) {
     if (editingDisabledRef.current || savingRef.current) return setEditStatus(editingDisabledRef.current ? "请先完成当前识别或精确校对" : "正在保存，请稍候");
     const selected = selectedNotesRef.current;
     const beats = uniqueBeats(selected);
     if (!beats.length) {
-      dotGestureRef.current = null;
       return setEditStatus("请先选择一个或多个音符节拍，再按小键盘 .");
     }
-    const key = beats.map((beat) => beat.id).sort((left, right) => left - right).join(",");
-    const now = Date.now();
-    const previous = dotGestureRef.current;
-    const continuing = Boolean(previous && previous.key === key && now - previous.time <= DOT_GESTURE_MS);
-    const dots = continuing ? 2 : 1;
-    const factor = dots === 2 ? 1.75 : 1.5;
+    const dots = double ? 2 : beats.every((beat) => beat.dots === 1) ? 0 : 1;
+    const factor = dots === 2 ? 1.75 : dots === 1 ? 1.5 : 1;
     const durations = new Map(beats.map((beat) => [beat, beatBaseDurationEighths(beat) * factor]));
     const restPlans = beats
       .map((beat) => followingRestPlan(beat, durations.get(beat)! - beatDurationEighths(beat)))
       .filter((plan) => plan.delta > 1e-9);
     for (const plan of restPlans) {
       if (plan.availableDuration + 1e-9 < plan.delta) {
-        dotGestureRef.current = null;
         return setEditStatus(`${dots === 2 ? "双附点" : "附点"}前没有足够休止时值，未修改`);
       }
     }
@@ -1446,7 +1426,6 @@ export function AlphaTabPlayer({
       return { beat, target: note ? recognitionNote(note) : null };
     });
     if (recognitionDraftRef.current && recognitionTargets.some(({ target }) => !target)) {
-      dotGestureRef.current = null;
       return setEditStatus("这个节拍无法安全映射回识别草稿，请在精确网格中修改");
     }
     for (const { beat, target } of recognitionTargets) {
@@ -1455,11 +1434,11 @@ export function AlphaTabPlayer({
         .filter((event) => event.onset_eighths > target.event.onset_eighths)
         .sort((left, right) => left.onset_eighths - right.onset_eighths)[0];
       if (target.event.onset_eighths + durations.get(beat)! > (next?.onset_eighths ?? MEASURE_EIGHTHS)) {
-        dotGestureRef.current = null;
         return setEditStatus(`${dots === 2 ? "双附点" : "附点"}会与后一个节拍重叠，未修改`);
       }
     }
-    const entry = continuing && previous ? previous.entry : historyEntry(dots === 2 ? "双附点" : "附点", selected);
+    const label = dots === 2 ? "双附点" : dots === 1 ? "附点" : "移除附点";
+    const entry = historyEntry(label, selected);
     const changed = beats.some((beat) => beat.dots !== dots);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
@@ -1469,12 +1448,8 @@ export function AlphaTabPlayer({
       target.event.duration_eighths = durations.get(beat)!;
       dirtyRecognitionMeasuresRef.current.add(target.measure.number);
     }
-    if (continuing && previous?.historyCommitted) rebuildAfterEdit("双附点已应用；两次按键合并为一次撤销", selected);
-    else if (changed) commitEdit(dots === 2 ? "双附点" : "附点", entry, selected);
-    if (continuing) dotGestureRef.current = null;
-    else dotGestureRef.current = { key, time: now, entry, historyCommitted: changed };
-    if (!changed) setEditStatus(dots === 2 ? "所选节拍已经是双附点" : "所选节拍已经是单附点；快速再按一次 . 可设双附点");
-    else if (!continuing) setEditStatus("单附点已应用；快速再按一次 . 可设双附点 · Ctrl/⌘S 保存");
+    if (changed) commitEdit(label, entry, selected);
+    else setEditStatus(dots === 2 ? "所选节拍已经是双附点" : dots === 1 ? "所选节拍已经是单附点" : "所选节拍没有附点");
   }
 
   function adjustSelectedBeatDuration(shorter: boolean) {
@@ -1522,7 +1497,6 @@ export function AlphaTabPlayer({
     const entry = historyEntry("删除音符", selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
-    dotGestureRef.current = null;
     for (const note of selected) {
       const linkedOrigins = uniqueNotes([note.hammerPullOrigin, note.slideOrigin, note.slurOrigin].filter((candidate): candidate is alphaTab.model.Note => Boolean(candidate)));
       for (const origin of linkedOrigins) {
@@ -1551,7 +1525,6 @@ export function AlphaTabPlayer({
     if (!entry) return;
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
-    dotGestureRef.current = null;
     for (const state of entry.states) restoreNoteState(state);
     for (const state of entry.beatStates) restoreBeatState(state);
     recognitionDraftRef.current = cloneMeasureDraft(entry.recognition);
@@ -1585,7 +1558,6 @@ export function AlphaTabPlayer({
       historyBaseDirtyRef.current = false;
       digitBufferRef.current = null;
       digitHistoryEntryRef.current = null;
-      dotGestureRef.current = null;
       dirtyRecognitionMeasuresRef.current.clear();
       setDirty(false);
       setEditStatus("已保存到私人曲库");
@@ -1624,7 +1596,7 @@ export function AlphaTabPlayer({
       }
       if (!commandKey && (event.key === "+" || event.key === "=")) { event.preventDefault(); adjustSelectedBeatDuration(true); return; }
       if (!commandKey && (event.key === "-" || event.key === "_")) { event.preventDefault(); adjustSelectedBeatDuration(false); return; }
-      if (event.code === "NumpadDecimal" || event.key === "Decimal" || event.key === ".") { event.preventDefault(); applySelectedDots(); return; }
+      if (event.code === "NumpadDecimal" || event.key === "Decimal" || event.key === ".") { event.preventDefault(); applySelectedDots(commandKey); return; }
       if (/^\d$/.test(event.key)) { event.preventDefault(); writeFretDigit(event.key); return; }
       if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); deleteSelectedNotes(); return; }
       const command = EDIT_COMMANDS.find((candidate) => candidate.shortcut.toLowerCase() === event.key.toLowerCase());
@@ -1771,16 +1743,16 @@ export function AlphaTabPlayer({
         <div className="direct-duration-control" aria-label="所选节拍时值">
           <span>所选时值</span>
           {DIRECT_DURATIONS.map((duration) => <button type="button" key={duration} className={selectedBeatDuration === duration ? "active" : ""} disabled={editingDisabled || saving || !selectedIds.length} onClick={() => setSelectedBeatDuration(duration)} aria-pressed={selectedBeatDuration === duration}>{directDurationLabel(duration)}</button>)}
-          <button type="button" className={`dot-duration-button ${selectedBeatDots ? "active" : ""}`} disabled={editingDisabled || saving || !selectedIds.length} onClick={applySelectedDots} aria-pressed={Boolean(selectedBeatDots)} title="单击设附点，快速双击设双附点；快捷键为小键盘 .">{selectedBeatDots === 2 ? "··" : "·"} 附点</button>
+          <button type="button" className={`dot-duration-button ${selectedBeatDots ? "active" : ""}`} disabled={editingDisabled || saving || !selectedIds.length} onClick={() => applySelectedDots(false)} aria-pressed={Boolean(selectedBeatDots)} title=". 切换单附点；Ctrl/⌘ + . 设双附点">{selectedBeatDots === 2 ? "··" : "·"} 附点</button>
           <i><kbd>+</kbd>/<kbd>−</kbd> 时值 · 小键盘 <kbd>.</kbd> 附点</i>
         </div>
       </div>
 
       <div className="studio-keyboard-hint">
         <button type="button" onClick={() => setShortcutHelp((value) => !value)}><Keyboard size={13} /> 快捷键 <kbd>?</kbd></button>
-        <span><kbd>Space</kbd> 播放/暂停</span><span><kbd>Ctrl/⌘ 点击</kbd> 离散多选</span><span><kbd>Shift 点击/方向键</kbd> 连续选择</span><span><kbd>0–9</kbd> 批量品位</span><span><kbd>小键盘 . ×1/×2</kbd> 附点 / 双附点</span><span><kbd>↑↓←→</kbd> 移动选区</span><span><kbd>Alt ↑↓</kbd> 保持音高换弦</span><span><kbd>Ctrl/⌘ S</kbd> 保存</span>
+        <span><kbd>Space</kbd> 播放/暂停</span><span><kbd>Ctrl/⌘ 点击</kbd> 离散多选</span><span><kbd>Shift 点击/方向键</kbd> 连续选择</span><span><kbd>0–9</kbd> 批量品位</span><span><kbd>.</kbd> 单附点开关</span><span><kbd>Ctrl/⌘ .</kbd> 双附点</span><span><kbd>↑↓←→</kbd> 移动选区</span><span><kbd>Alt ↑↓</kbd> 保持音高换弦</span><span><kbd>Ctrl/⌘ S</kbd> 保存</span>
       </div>
-      {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>拖过音符可扩展选区；小键盘 <kbd>.</kbd> 一次附点、快速两次双附点；<kbd>Esc</kbd> 清空；<kbd>Delete</kbd> 删除；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
+      {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>拖过音符可扩展选区；<kbd>.</kbd> 切换单附点，<kbd>Ctrl/⌘ .</kbd> 设双附点；<kbd>Esc</kbd> 清空；<kbd>Delete</kbd> 删除；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
 
       <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可选择和编辑的乐谱"} />
       <div className="score-selection-layer" aria-hidden="true">

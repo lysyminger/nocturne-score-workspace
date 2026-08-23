@@ -73,10 +73,10 @@ export const api = {
       `/api/projects/${id}/recognition/measures/${measure}/retry`,
       { method: "POST" }
     ),
-  updateRecognitionMeasure: (id: string, measure: number, events: RecognitionEvent[]) =>
+  updateRecognitionMeasure: (id: string, measure: number, events: RecognitionEvent[], timeSignature?: { numerator: number; denominator: number }) =>
     request<RecognitionDiagnostics>(`/api/projects/${id}/recognition/measures/${measure}`, {
       method: "PATCH",
-      body: JSON.stringify({ events })
+      body: JSON.stringify({ events, ...(timeSignature ? { time_signature: timeSignature } : {}) })
     }),
   appendRecognitionMeasure: (id: string) =>
     request<RecognitionDiagnostics>(`/api/projects/${id}/recognition/measures`, { method: "POST" }),

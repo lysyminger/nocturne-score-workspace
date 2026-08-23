@@ -679,6 +679,8 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   background: rgba(112,99,218,.22);
   box-shadow: 0 0 0 1px rgba(255,255,255,.62);
   cursor: crosshair;
+  touch-action: none;
+  user-select: none;
   transition: opacity .12s ease, transform .12s ease, background-color .12s ease;
 }
 .score-selection-layer .score-grid-point:hover { background: rgba(103,89,215,.72); transform: scale(1.35); }

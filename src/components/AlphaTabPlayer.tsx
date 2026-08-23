@@ -901,7 +901,7 @@ export function AlphaTabPlayer({
     setScoreCursor(null);
   }
 
-  function activateGridPoint(point: ScoreGridPoint, event: React.PointerEvent<HTMLButtonElement>) {
+  function activateGridPoint(point: ScoreGridPoint, event: React.PointerEvent<HTMLElement>) {
     if (editingDisabledRef.current || savingRef.current) return;
     event.preventDefault();
     hostRef.current?.focus({ preventScroll: true });
@@ -2110,7 +2110,8 @@ export function AlphaTabPlayer({
         return;
       }
       if (event.code === "Space" && !isNativeControlTarget(event.target)) { event.preventDefault(); if (ready) apiRef.current?.playPause(); return; }
-      if (isTypingTarget(event.target)) return;
+      const scorePointTarget = event.target instanceof HTMLElement && Boolean(event.target.closest(".score-grid-point"));
+      if (isTypingTarget(event.target) && !scorePointTarget) return;
       const commandKey = event.ctrlKey || event.metaKey;
       if (event.key === "?") { event.preventDefault(); setShortcutHelp((value) => !value); return; }
       if (editingDisabledRef.current || savingRef.current) return;
@@ -2303,7 +2304,7 @@ export function AlphaTabPlayer({
 
       <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可直接在空拍和音符上编辑的乐谱"} />
       <div className="score-selection-layer" aria-hidden="true">
-        {scoreGridPoints.map((point) => <button type="button" tabIndex={-1} className="score-grid-point" key={point.key} style={{ left: point.marker.x, top: point.marker.y, width: point.marker.width, height: point.marker.height }} onPointerDown={(event) => activateGridPoint(point, event)} />)}
+        {scoreGridPoints.map((point) => <span className="score-grid-point" key={point.key} style={{ left: point.marker.x, top: point.marker.y, width: point.marker.width, height: point.marker.height }} onPointerDown={(event) => activateGridPoint(point, event)} />)}
         {measureMarkers.map((marker) => <i className="measure-error-marker" key={`measure-${marker.measure}`} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }}><b>{marker.measure}</b></i>)}
         {selectionMarkers.map((marker) => <i key={marker.id} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }} />)}
         {scoreCursor && <i className="score-cell-cursor" style={{ left: scoreCursor.marker.x, top: scoreCursor.marker.y, width: scoreCursor.marker.width, height: scoreCursor.marker.height }}><b>{restGlyph(entryDuration)}</b></i>}

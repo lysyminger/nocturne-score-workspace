@@ -6,7 +6,6 @@ import {
   Command,
   Download,
   FileMusic,
-  GripHorizontal,
   ImageIcon,
   Keyboard,
   LoaderCircle,
@@ -45,7 +44,7 @@ type Props = {
   onFocusMeasure: (measure: number) => void;
   onDirtyChange: (dirty: boolean) => void;
   onImportScore: (file: File) => void;
-  onScrollElementChange: (element: HTMLDivElement | null) => void;
+  onScrollElementChange: (element: HTMLElement | null) => void;
   onSaveScore: (file: File) => Promise<void>;
   onSaveRecognition: (changes: RecognitionChange[]) => Promise<void>;
   onRetryRecognition: (measure: number) => Promise<void>;
@@ -53,27 +52,6 @@ type Props = {
 };
 
 type ExportKind = "gp" | "midi" | "wav";
-
-const SCORE_PANEL_HEIGHT_KEY = "nocturne-score-panel-height";
-const SCORE_PANEL_MIN_HEIGHT = 288;
-
-function scorePanelMaximumHeight() {
-  return typeof window === "undefined" ? 760 : Math.max(SCORE_PANEL_MIN_HEIGHT, Math.min(960, window.innerHeight - 96));
-}
-
-function clampScorePanelHeight(value: number) {
-  return Math.round(Math.min(scorePanelMaximumHeight(), Math.max(SCORE_PANEL_MIN_HEIGHT, value)));
-}
-
-function adaptiveScorePanelHeight() {
-  return typeof window === "undefined" ? 520 : clampScorePanelHeight(window.innerHeight - 432);
-}
-
-function defaultScorePanelHeight() {
-  if (typeof window === "undefined") return 520;
-  const saved = Number(localStorage.getItem(SCORE_PANEL_HEIGHT_KEY));
-  return Number.isFinite(saved) && saved > 0 ? clampScorePanelHeight(saved) : adaptiveScorePanelHeight();
-}
 
 type EditCommand = {
   id: TabTechnique;
@@ -696,7 +674,6 @@ export function AlphaTabPlayer({
   const onFocusMeasureRef = useRef(onFocusMeasure);
   const preservedScrollTopRef = useRef(0);
   const restoringScrollRef = useRef(false);
-  const panelHeightRef = useRef(0);
   const editableGhostBeatsRef = useRef(new Set<alphaTab.model.Beat>());
 
   const [ready, setReady] = useState(false);
@@ -723,13 +700,12 @@ export function AlphaTabPlayer({
   const [commandQuery, setCommandQuery] = useState("");
   const [shortcutHelp, setShortcutHelp] = useState(false);
   const [barsPerRow, setBarsPerRow] = useState<3 | 4>(() => localStorage.getItem("nocturne-bars-per-row") === "3" ? 3 : 4);
-  const [panelHeight, setPanelHeight] = useState(defaultScorePanelHeight);
-  const [resizingPanel, setResizingPanel] = useState(false);
-  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
+  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
   const syncAvailable = validSyncAnchorCount >= 2;
   const scrollPanelRef = useCallback((element: HTMLDivElement | null) => {
-    setScrollElement(element);
-    onScrollElementChange(element);
+    const pageScroller = element ? document.scrollingElement as HTMLElement | null : null;
+    setScrollElement(pageScroller);
+    onScrollElementChange(pageScroller);
   }, [onScrollElementChange]);
 
   useEffect(() => {
@@ -740,16 +716,6 @@ export function AlphaTabPlayer({
   }, [dirty, recognition]);
   useEffect(() => { referenceModeRef.current = referenceMode; }, [referenceMode]);
   useEffect(() => { editingDisabledRef.current = editingDisabled; }, [editingDisabled]);
-  useEffect(() => { panelHeightRef.current = panelHeight; }, [panelHeight]);
-  useEffect(() => {
-    const fitPanelToViewport = () => {
-      const next = clampScorePanelHeight(panelHeightRef.current);
-      panelHeightRef.current = next;
-      setPanelHeight(next);
-    };
-    window.addEventListener("resize", fitPanelToViewport);
-    return () => window.removeEventListener("resize", fitPanelToViewport);
-  }, []);
   useEffect(() => {
     if (!scrollElement) return;
     preservedScrollTopRef.current = scrollElement.scrollTop;
@@ -769,59 +735,6 @@ export function AlphaTabPlayer({
     };
   }, [scrollElement]);
 
-  function setAndRememberPanelHeight(value: number) {
-    const next = clampScorePanelHeight(value);
-    panelHeightRef.current = next;
-    setPanelHeight(next);
-    localStorage.setItem(SCORE_PANEL_HEIGHT_KEY, String(next));
-  }
-
-  function beginPanelResize(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    const handle = event.currentTarget;
-    const pointerId = event.pointerId;
-    const startY = event.clientY;
-    const startHeight = panelHeightRef.current;
-    let currentHeight = startHeight;
-    setResizingPanel(true);
-    handle.setPointerCapture(pointerId);
-    const move = (moveEvent: PointerEvent) => {
-      if (moveEvent.pointerId !== pointerId) return;
-      currentHeight = clampScorePanelHeight(startHeight + moveEvent.clientY - startY);
-      panelHeightRef.current = currentHeight;
-      setPanelHeight(currentHeight);
-    };
-    const finish = (finishEvent: PointerEvent) => {
-      if (finishEvent.pointerId !== pointerId) return;
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", finish);
-      handle.removeEventListener("pointercancel", finish);
-      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
-      setResizingPanel(false);
-      setAndRememberPanelHeight(currentHeight);
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", finish);
-    handle.addEventListener("pointercancel", finish);
-  }
-
-  function resizePanelFromKeyboard(event: React.KeyboardEvent<HTMLDivElement>) {
-    const step = event.shiftKey ? 64 : 24;
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setAndRememberPanelHeight(panelHeightRef.current - step);
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setAndRememberPanelHeight(panelHeightRef.current + step);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      setAndRememberPanelHeight(SCORE_PANEL_MIN_HEIGHT);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      setAndRememberPanelHeight(scorePanelMaximumHeight());
-    }
-  }
   useEffect(() => { onFocusMeasureRef.current = onFocusMeasure; }, [onFocusMeasure]);
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
@@ -2662,7 +2575,7 @@ export function AlphaTabPlayer({
       </div>
       {shortcutHelp && <div className="shortcut-help-panel"><strong>编辑快捷键</strong><span>先点一个音作为队列起点，再点终点会自动包含中间全部节拍；点击选区内音符可改回单选。<kbd>Backspace/Delete</kbd> 删除；<kbd>Esc</kbd> 清空；<kbd>Ctrl/⌘ Z</kbd> 撤销。</span><span>{EDIT_COMMANDS.map((command) => `${command.shortcut} ${command.label}`).join(" · ")}</span></div>}
 
-      <div ref={scrollPanelRef} className="score-canvas-panel" style={{ height: panelHeight }}>
+      <div ref={scrollPanelRef} className="score-canvas-panel">
         <div className="score-canvas-content">
           <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可直接在空拍和音符上编辑的乐谱"} />
           <div className="score-selection-layer" aria-hidden="true">
@@ -2671,23 +2584,6 @@ export function AlphaTabPlayer({
             {scoreCursor && <i className={`score-cell-cursor ${cursorIsRestColumn ? "rest-column" : ""}`} style={{ left: scoreCursor.marker.x, top: scoreCursor.marker.y, width: scoreCursor.marker.width, height: scoreCursor.marker.height }}>{cursorIsRestColumn && !cursorIsEntityRest && <b className="rest-preview"><span>{restGlyph(entryDuration)}</span><small>{directDurationLabel(entryDuration)}</small></b>}</i>}
           </div>
         </div>
-      </div>
-      <div
-        className={`score-panel-resizer ${resizingPanel ? "active" : ""}`}
-        role="separator"
-        aria-label="调整谱面区域高度"
-        aria-orientation="horizontal"
-        aria-valuemin={SCORE_PANEL_MIN_HEIGHT}
-        aria-valuemax={scorePanelMaximumHeight()}
-        aria-valuenow={panelHeight}
-        tabIndex={0}
-        title="上下拖动调整谱面高度；双击恢复自适应高度"
-        onPointerDown={beginPanelResize}
-        onKeyDown={resizePanelFromKeyboard}
-        onDoubleClick={() => setAndRememberPanelHeight(adaptiveScorePanelHeight())}
-      >
-        <GripHorizontal size={16} />
-        <span>{panelHeight}px</span>
       </div>
 
       <div className="alpha-controls glass-bar">

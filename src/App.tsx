@@ -494,7 +494,7 @@ function ProjectWorkspace({
   const [scoreRevision, setScoreRevision] = useState("");
   const [scoreDirty, setScoreDirty] = useState(false);
   const [stageViewport, setStageViewport] = useState<HTMLDivElement | null>(null);
-  const [scoreViewport, setScoreViewport] = useState<HTMLDivElement | null>(null);
+  const [scoreViewport, setScoreViewport] = useState<HTMLElement | null>(null);
   const [viewMode, setViewMode] = useState<"video" | "frames" | "images" | "score">("video");
   const audioRef = useRef<HTMLAudioElement>(null);
   const initializedViewRef = useRef(false);

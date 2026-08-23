@@ -533,8 +533,11 @@ function ProjectWorkspace({
     setTitle(value.title);
     if (!initializedViewRef.current) {
       setScoreRevision(value.updated_at);
+      const isImportedPdf = value.source_kind === "manual_tab" && Boolean(value.pdf_url);
       setViewMode(
-        value.score_file_url
+        isImportedPdf && value.score_images.length
+          ? "images"
+          : value.score_file_url
           ? "score"
           : value.score_images.length
           ? "images"

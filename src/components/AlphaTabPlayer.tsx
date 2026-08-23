@@ -703,7 +703,6 @@ export function AlphaTabPlayer({
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [selectedColumnCount, setSelectedColumnCount] = useState(0);
   const [selectionMarkers, setSelectionMarkers] = useState<SelectionMarker[]>([]);
-  const [ghostRestMarkers, setGhostRestMarkers] = useState<SelectionMarker[]>([]);
   const [scoreCursor, setScoreCursor] = useState<ScoreCursor | null>(null);
   const [measureMarkers, setMeasureMarkers] = useState<MeasureMarker[]>([]);
   const [entryDuration, setEntryDurationState] = useState(1);
@@ -906,13 +905,43 @@ export function AlphaTabPlayer({
     }));
   }
 
+  function syncEmptyBeatVisibility(host = hostRef.current) {
+    if (!host) return;
+    for (const element of host.querySelectorAll(".editor-empty-beat")) element.classList.remove("editor-empty-beat");
+    const lookup = apiRef.current?.renderer.boundsLookup;
+    const hostBounds = host.getBoundingClientRect();
+    let renderedBeatGroups: Element[] | null = null;
+    for (const beat of [...editableGhostBeatsRef.current]) {
+      const exact = [...host.querySelectorAll(`.b${beat.id}`)];
+      if (exact.length) {
+        for (const element of exact) element.classList.add("editor-empty-beat");
+        continue;
+      }
+      const bounds = lookup?.findBeat(beat);
+      if (!bounds) continue;
+      renderedBeatGroups ??= [...host.querySelectorAll("g[class]")].filter((element) => /^b\d+$/.test(element.getAttribute("class") ?? ""));
+      const range = beatStringRange(bounds);
+      const targetX = hostBounds.left + beatColumnX(bounds);
+      const targetY = hostBounds.top + (range.top + range.bottom) / 2;
+      let closest: { element: Element; distance: number } | null = null;
+      for (const element of renderedBeatGroups) {
+        const rect = element.getBoundingClientRect();
+        const dx = Math.abs(rect.left + rect.width / 2 - targetX);
+        const dy = Math.abs(rect.top + rect.height / 2 - targetY);
+        if (dx > 28 || dy > 55) continue;
+        const distance = dx + dy;
+        if (!closest || distance < closest.distance) closest = { element, distance };
+      }
+      closest?.element.classList.add("editor-empty-beat");
+    }
+  }
+
   function updateSelectionMarkers() {
     const api = apiRef.current;
     const host = hostRef.current;
     const lookup = api?.renderer.boundsLookup;
     if (!api || !host || !lookup) {
       setSelectionMarkers([]);
-      setGhostRestMarkers([]);
       setMeasureMarkers([]);
       return;
     }
@@ -925,13 +954,7 @@ export function AlphaTabPlayer({
       markers.push({ id: note.id, x: host.offsetLeft + bounds.x - 6, y: host.offsetTop + bounds.y - 5, width: Math.max(18, bounds.w + 12), height: Math.max(18, bounds.h + 10) });
     }
     setSelectionMarkers(markers);
-    setGhostRestMarkers([...editableGhostBeatsRef.current].flatMap((beat, index) => {
-      const bounds = lookup.findBeat(beat);
-      if (!bounds) return [];
-      const stringCount = beat.voice.bar.staff.tuning.length || 6;
-      const marker = cursorMarkerFor(bounds, Math.max(1, Math.ceil(stringCount / 2)), "rest");
-      return marker ? [{ ...marker, id: -2000 - index }] : [];
-    }));
+    syncEmptyBeatVisibility(host);
 
     const currentCursor = scoreCursorRef.current;
     if (currentCursor) {
@@ -1106,7 +1129,6 @@ export function AlphaTabPlayer({
     scoreRef.current = null;
     midiRef.current = null;
     editableGhostBeatsRef.current.clear();
-    setGhostRestMarkers([]);
     selectedNotesRef.current = [];
     selectedColumnBeatsRef.current = [];
     dragSelectionRef.current = null;
@@ -1253,6 +1275,15 @@ export function AlphaTabPlayer({
     host.addEventListener("pointerup", finishPointerSelection, true);
     host.addEventListener("pointercancel", finishPointerSelection, true);
     host.addEventListener("contextmenu", openRestColumn, true);
+    let emptyVisibilityFrame: number | null = null;
+    const emptyVisibilityObserver = new MutationObserver(() => {
+      if (emptyVisibilityFrame !== null) window.cancelAnimationFrame(emptyVisibilityFrame);
+      emptyVisibilityFrame = window.requestAnimationFrame(() => {
+        emptyVisibilityFrame = null;
+        syncEmptyBeatVisibility(host);
+      });
+    });
+    emptyVisibilityObserver.observe(host, { childList: true, subtree: true });
     const attachEngine = () => {
       const output = api.player?.output as alphaTab.synth.IExternalMediaSynthOutput | undefined;
       if (output && "handler" in output) { externalOutput = output; output.handler = engine; }
@@ -1342,6 +1373,8 @@ export function AlphaTabPlayer({
       host.removeEventListener("pointerup", finishPointerSelection, true);
       host.removeEventListener("pointercancel", finishPointerSelection, true);
       host.removeEventListener("contextmenu", openRestColumn, true);
+      emptyVisibilityObserver.disconnect();
+      if (emptyVisibilityFrame !== null) window.cancelAnimationFrame(emptyVisibilityFrame);
       window.removeEventListener("resize", resize);
       if (initialScrollTimer !== null) window.clearTimeout(initialScrollTimer);
       if (midiRebuildTimerRef.current !== null) window.clearTimeout(midiRebuildTimerRef.current);
@@ -1413,6 +1446,7 @@ export function AlphaTabPlayer({
     if (explicitDelta <= 1e-9) return;
     const targetDuration = Math.max(0, plan.explicitDuration - Math.min(explicitDelta, plan.explicitDuration));
     const shapes = restShapes(targetDuration);
+    const fallbackEmpty = plan.beats.at(-1)?.isEmpty ?? false;
     for (const beat of plan.beats) rememberBeat(entry, beat);
     for (let index = 0; index < shapes.length; index += 1) {
       const shape = shapes[index];
@@ -1433,11 +1467,40 @@ export function AlphaTabPlayer({
       }
       beat.duration = shape.duration;
       beat.dots = shape.dots;
+      beat.isEmpty = plan.beats[index]?.isEmpty ?? fallbackEmpty;
+      if (beat.isEmpty) editableGhostBeatsRef.current.add(beat);
+      else editableGhostBeatsRef.current.delete(beat);
     }
     for (const beat of plan.beats.slice(shapes.length)) {
       const index = plan.voice.beats.indexOf(beat);
       if (index >= 0) plan.voice.beats.splice(index, 1);
+      editableGhostBeatsRef.current.delete(beat);
     }
+  }
+
+  function insertEmptyDurationAfter(beat: alphaTab.model.Beat, eighths: number, entry: HistoryEntry) {
+    const voice = beat.voice;
+    const start = voice.beats.indexOf(beat) + 1;
+    if (start <= 0) return;
+    const emptyBeats = restShapes(eighths).map((shape, index) => {
+      const empty = newEmptyBeatForEdit(voice, entry, start + index, shape.duration, shape.dots);
+      editableGhostBeatsRef.current.add(empty);
+      return empty;
+    });
+    voice.beats.splice(start, 0, ...emptyBeats);
+  }
+
+  function consumeRecognitionRests(measure: RecognitionMeasure, start: number, end: number) {
+    if (end <= start + 1e-9) return;
+    measure.events = measure.events.flatMap((event) => {
+      if (!event.rest) return [event];
+      const eventEnd = event.onset_eighths + event.duration_eighths;
+      if (eventEnd <= start + 1e-9 || event.onset_eighths >= end - 1e-9) return [event];
+      const remaining: RecognitionEvent[] = [];
+      if (event.onset_eighths < start - 1e-9) remaining.push({ ...event, duration_eighths: start - event.onset_eighths });
+      if (eventEnd > end + 1e-9) remaining.push({ ...event, onset_eighths: end, duration_eighths: eventEnd - end });
+      return remaining;
+    }).sort((left, right) => left.onset_eighths - right.onset_eighths);
   }
 
   function recognitionString(note: alphaTab.model.Note, alphaTabString = note.string) {
@@ -2237,37 +2300,45 @@ export function AlphaTabPlayer({
     const selected = selectedNotesRef.current;
     const beats = uniqueBeats(selected);
     if (!beats.length) return setEditStatus("请先选择一个或多个音符节拍");
-    const selectedBeats = new Set(beats);
-    for (const beat of beats) {
-      const masterBar = beat.voice.bar.masterBar;
-      const capacity = masterBar.timeSignatureNumerator * 8 / masterBar.timeSignatureDenominator;
-      const total = beat.voice.beats.reduce((sum, candidate) => sum + (selectedBeats.has(candidate) ? eighths : beatDurationEighths(candidate)), 0);
-      if (total > capacity + 1e-9) return setEditStatus(`第 ${masterBar.index + 1} 小节会超过拍号容量，未修改`);
+    const changes = beats.map((beat) => ({
+      beat,
+      current: beatDurationEighths(beat),
+      delta: eighths - beatDurationEighths(beat),
+      restPlan: followingRestPlan(beat, Math.max(0, eighths - beatDurationEighths(beat)))
+    }));
+    for (const change of changes) {
+      if (change.delta > change.restPlan.availableDuration + 1e-9) {
+        return setEditStatus(`后方空拍不足，${directDurationLabel(change.current)} 不能延长为 ${directDurationLabel(eighths)}`);
+      }
     }
-    const recognitionTargets = beats.map((beat) => {
+    const recognitionTargets = changes.map(({ beat, current }) => {
       const note = beat.notes[0];
-      return note ? recognitionNote(note) : null;
+      return { beat, current, target: note ? recognitionNote(note) : null };
     });
-    if (recognitionDraftRef.current && recognitionTargets.some((target) => !target)) {
+    if (recognitionDraftRef.current && recognitionTargets.some(({ target }) => !target)) {
       return setEditStatus("这个节拍无法安全映射回识别草稿，请在精确网格中修改");
     }
-    for (const target of recognitionTargets) {
+    for (const { beat, target } of recognitionTargets) {
       if (!target) continue;
+      const capacity = beat.voice.bar.masterBar.timeSignatureNumerator * 8 / beat.voice.bar.masterBar.timeSignatureDenominator;
       const next = target.measure.events
-        .filter((event) => event.onset_eighths > target.event.onset_eighths)
+        .filter((event) => !event.rest && event.onset_eighths > target.event.onset_eighths)
         .sort((left, right) => left.onset_eighths - right.onset_eighths)[0];
-      if (target.event.onset_eighths + eighths > (next?.onset_eighths ?? MEASURE_EIGHTHS)) {
+      if (target.event.onset_eighths + eighths > (next?.onset_eighths ?? capacity) + 1e-9) {
         return setEditStatus("这个时值会与后一个节拍重叠，未修改");
       }
     }
     const entry = historyEntry("音符时值", selected);
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
-    for (const beat of beats) {
-      beat.duration = alphaDuration(eighths);
-      beat.dots = 0;
+    for (const change of changes) {
+      if (change.delta > 1e-9) applyRestPlan(change.restPlan, entry);
+      else if (change.delta < -1e-9) insertEmptyDurationAfter(change.beat, -change.delta, entry);
+      change.beat.duration = alphaDuration(eighths);
+      change.beat.dots = 0;
     }
-    for (const target of recognitionTargets) if (target) {
+    for (const { current, target } of recognitionTargets) if (target) {
+      if (eighths > current + 1e-9) consumeRecognitionRests(target.measure, target.event.onset_eighths + current, target.event.onset_eighths + eighths);
       target.event.duration_eighths = eighths;
       dirtyRecognitionMeasuresRef.current.add(target.measure.number);
     }
@@ -2335,8 +2406,8 @@ export function AlphaTabPlayer({
     }
     const currentBeat = selectedNotesRef.current[0]?.beat;
     if (!currentBeat) return setEditStatus("请先选择一个或多个音符节拍");
-    const current = beatDurationEighths(currentBeat);
-    const index = DIRECT_DURATIONS.findIndex((value) => value <= current + 1e-9);
+    const current = beatBaseDurationEighths(currentBeat);
+    const index = DIRECT_DURATIONS.findIndex((value) => value === current);
     const nextIndex = Math.max(0, Math.min(DIRECT_DURATIONS.length - 1, (index < 0 ? 2 : index) + (shorter ? 1 : -1)));
     setSelectedBeatDuration(DIRECT_DURATIONS[nextIndex]);
   }
@@ -2428,7 +2499,12 @@ export function AlphaTabPlayer({
       dirtyRecognitionMeasuresRef.current.add(measure.number);
     }
     const emptyColumns = touchedBeats.filter((beat) => beat.isEmpty).length;
-    const previewBeat = [...(selectedColumns.length ? selectedColumns : touchedBeats)].reverse().find((beat) => beat.isEmpty);
+    const emptiedBars = new Set(touchedBeats
+      .filter((beat) => beat.voice.beats.every((candidate) => candidate.isEmpty))
+      .map((beat) => beat.voice.bar));
+    const previewBeat = [...(selectedColumns.length ? selectedColumns : touchedBeats)]
+      .reverse()
+      .find((beat) => beat.isEmpty && !emptiedBars.has(beat.voice.bar));
     const previewCursor = previewBeat ? cursorAt(
       previewBeat,
       Math.round(previewBeat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2,
@@ -2444,6 +2520,9 @@ export function AlphaTabPlayer({
       scoreCursorRef.current = previewCursor;
       setScoreCursor(previewCursor);
       setEditStatus(`删除位置显示灰色休止预览 · ←/→ 移动，Enter 确认为实体`);
+    } else {
+      clearScoreCursor();
+      if (emptiedBars.size) setEditStatus(`已清空 ${emptiedBars.size} 个小节 · 谱面保持空白，点击空位可重新输入`);
     }
   }
 
@@ -2534,8 +2613,8 @@ export function AlphaTabPlayer({
         );
         return;
       }
-      if (!commandKey && (event.key === "+" || event.key === "=")) { event.preventDefault(); adjustSelectedBeatDuration(true); return; }
-      if (!commandKey && (event.key === "-" || event.key === "_")) { event.preventDefault(); adjustSelectedBeatDuration(false); return; }
+      if (!commandKey && (event.code === "NumpadAdd" || event.key === "+" || event.key === "=")) { event.preventDefault(); adjustSelectedBeatDuration(true); return; }
+      if (!commandKey && (event.code === "NumpadSubtract" || event.key === "-" || event.key === "_")) { event.preventDefault(); adjustSelectedBeatDuration(false); return; }
       if (event.code === "NumpadDecimal" || event.key === "Decimal" || event.key === ".") { event.preventDefault(); applySelectedDots(commandKey); return; }
       if (/^\d$/.test(event.key)) { event.preventDefault(); writeFretDigit(event.key); return; }
       if (event.key === "Enter" || event.key.toLowerCase() === "r") { if (commitRestAtScoreCursor()) event.preventDefault(); return; }
@@ -2715,7 +2794,6 @@ export function AlphaTabPlayer({
           <div ref={hostRef} className="alpha-host" tabIndex={0} aria-disabled={editingDisabled || saving} aria-label={editingDisabled ? "当前只读的可播放乐谱" : saving ? "正在保存的只读乐谱" : "可直接在空拍和音符上编辑的乐谱"} />
           <div className="score-selection-layer" aria-hidden="true">
             {measureMarkers.map((marker) => <i className="measure-error-marker" key={`measure-${marker.measure}`} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }}><b>{marker.measure} · {formatQuarterBeats(marker.used)}/{formatQuarterBeats(marker.capacity)}</b></i>)}
-            {ghostRestMarkers.map((marker) => <i className="ghost-rest-mask" key={`ghost-${marker.id}`} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }} />)}
             {selectionMarkers.map((marker) => <i className={marker.kind === "range" ? "range-selection" : undefined} key={marker.id} style={{ left: marker.x, top: marker.y, width: marker.width, height: marker.height }} />)}
             {scoreCursor && <i className={`score-cell-cursor ${cursorIsRestColumn ? "rest-column" : ""} ${cursorIsRestColumn && !cursorIsEntityRest ? "ghost-rest-column" : ""}`} style={{ left: scoreCursor.marker.x, top: scoreCursor.marker.y, width: scoreCursor.marker.width, height: scoreCursor.marker.height }}>{cursorIsRestColumn && !cursorIsEntityRest && <b className="rest-preview"><span>{restGlyph(entryDuration)}</span><small>{directDurationLabel(entryDuration)}</small></b>}</i>}
           </div>

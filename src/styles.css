@@ -716,15 +716,7 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
   animation: none;
 }
 .score-selection-layer .range-selection::after { display: none; }
-.score-selection-layer .ghost-rest-mask {
-  z-index: 2;
-  border: 0;
-  border-radius: 0;
-  background: #f6f5f1;
-  box-shadow: none;
-  animation: none;
-}
-.score-selection-layer .ghost-rest-mask::after { display: none; }
+.alpha-host .editor-empty-beat { display: none; }
 .score-selection-layer .score-cell-cursor {
   z-index: 3;
   border-color: rgba(113,101,222,.95);
@@ -735,7 +727,7 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .score-selection-layer .score-cell-cursor::before { content: ""; position: absolute; top: 50%; left: 3px; right: 3px; height: 1px; background: #7268d9; transform: translateY(-50%); }
 .score-selection-layer .score-cell-cursor::after { background: #7268d9; }
 .score-selection-layer .score-cell-cursor.rest-column { border-radius: .3rem; background: rgba(118,105,231,.07); }
-.score-selection-layer .score-cell-cursor.ghost-rest-column { background: #f6f5f1; }
+.score-selection-layer .score-cell-cursor.ghost-rest-column { background: rgba(118,105,231,.07); }
 .score-selection-layer .score-cell-cursor.ghost-rest-column::before { display: none; }
 .score-selection-layer .score-cell-cursor > .rest-preview { position: absolute; z-index: 2; left: 50%; top: 50%; display: grid; place-items: center; color: rgba(86,86,94,.58); transform: translate(-50%, -50%); }
 .score-selection-layer .rest-preview > span { min-width: 1.15rem; min-height: 1.15rem; text-align: center; font: 500 1.2rem/1 "Bravura", "Segoe UI Symbol", serif; filter: drop-shadow(0 1px 0 rgba(255,255,255,.72)); }

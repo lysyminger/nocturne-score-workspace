@@ -48,6 +48,8 @@ export const api = {
   project: (id: string) => request<Project>(`/api/projects/${id}`),
   createProject: (payload: { source_input: string; title: string; rights_confirmed: boolean }) =>
     request<Project>("/api/projects", { method: "POST", body: JSON.stringify(payload) }),
+  createManualTabProject: (payload: { title: string; measure_count: number; tempo_bpm: number }) =>
+    request<Project>("/api/projects/manual-tab", { method: "POST", body: JSON.stringify(payload) }),
   renameProject: (id: string, title: string) =>
     request<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
   updateProjectRights: (id: string, rightsConfirmed: boolean) =>
@@ -76,6 +78,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ events })
     }),
+  appendRecognitionMeasure: (id: string) =>
+    request<RecognitionDiagnostics>(`/api/projects/${id}/recognition/measures`, { method: "POST" }),
   uploadImages: (id: string, files: FileList | File[]) => {
     const body = new FormData();
     Array.from(files).forEach((file) => body.append("files", file));

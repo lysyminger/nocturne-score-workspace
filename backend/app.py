@@ -26,7 +26,13 @@ from backend.database import Database
 from backend.score_pdf import build_slice_preview_pdf
 from backend.security import hash_password, hash_session_token, new_session_token, verify_password
 from backend.tab_recognition import FrameInput as TabFrameInput
-from backend.tab_recognition import recognize_tab_frames, recognize_tab_measure, update_recognized_measure
+from backend.tab_recognition import (
+    append_blank_tab_measure,
+    create_blank_tab_score,
+    recognize_tab_frames,
+    recognize_tab_measure,
+    update_recognized_measure,
+)
 from backend.video_analysis import (
     MAX_ANALYSIS_FRAMES,
     MAX_ANALYSIS_SECONDS,
@@ -71,6 +77,12 @@ class ProjectCreateRequest(BaseModel):
     source_input: str = Field(min_length=2, max_length=500)
     title: str = Field(default="", max_length=120)
     rights_confirmed: bool = False
+
+
+class ManualTabProjectRequest(BaseModel):
+    title: str = Field(default="未命名六线谱", min_length=1, max_length=120)
+    measure_count: int = Field(default=8, ge=1, le=128)
+    tempo_bpm: float = Field(default=120, ge=30, le=300)
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -423,6 +435,51 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     source.source_id,
                     source.url,
                     int(body.rights_confirmed),
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        return project_payload(row)
+
+    @api.post("/api/projects/manual-tab", status_code=201)
+    def create_manual_tab_project(
+        body: ManualTabProjectRequest,
+        user: dict = Depends(current_user),
+    ) -> dict:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=422, detail="请输入乐谱名称")
+        project_id = uuid.uuid4().hex
+        output_dir = projects_dir / project_id / "manual-score"
+        try:
+            result = create_blank_tab_score(
+                output_dir,
+                title=title,
+                measure_count=body.measure_count,
+                tempo_bpm=body.tempo_bpm,
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"空白六线谱创建失败：{str(exc)[:240]}") from exc
+
+        now = utc_text()
+        with db.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO projects(
+                    id, user_id, title, source_input, source_kind, source_id, source_url,
+                    rights_confirmed, status, status_message, recognition_summary,
+                    score_file_path, score_file_name, created_at, updated_at
+                ) VALUES (?, ?, ?, 'manual://tab', 'manual_tab', '手动六线谱', '',
+                    1, 'score_ready', '空白六线谱已创建，可以逐弦打谱', ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    user["id"],
+                    title,
+                    json.dumps(result.summary, ensure_ascii=False),
+                    str(result.score_path),
+                    result.score_path.name,
                     now,
                     now,
                 ),
@@ -1236,7 +1293,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
     def tab_diagnostics_for_project(project) -> tuple[Path, Path, dict]:
         summary = json_object(project["recognition_summary"])
-        if not summary or summary.get("engine") != "tab_cv_tesseract":
+        if not summary or summary.get("engine") not in {"tab_cv_tesseract", "tab_manual_editor"}:
             raise HTTPException(status_code=409, detail="当前项目没有可编辑的 TAB 识别结果")
         if not project["score_file_path"]:
             raise HTTPException(status_code=404, detail="识别乐谱文件不存在")
@@ -1268,6 +1325,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         project = owned_project(project_id, user["id"])
         if project["status"] in {"downloading", "analyzing", "recognizing"}:
             raise HTTPException(status_code=409, detail="当前项目正在处理，请稍后再试")
+        summary = json_object(project["recognition_summary"])
+        if (summary or {}).get("engine") == "tab_manual_editor":
+            raise HTTPException(status_code=409, detail="手动六线谱没有源视频帧，不能重新识别")
         capabilities = capability_status()
         if not capabilities["tab_ocr"]:
             raise HTTPException(status_code=503, detail="重新识别需要 OpenCV 和 Tesseract OCR")
@@ -1365,6 +1425,39 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 (
                     json.dumps(summary, ensure_ascii=False),
                     f"第 {measure_number} 小节已人工校正并重新生成乐谱",
+                    now,
+                    project_id,
+                ),
+            )
+        return diagnostics
+
+    @api.post("/api/projects/{project_id}/recognition/measures", status_code=201)
+    def append_recognition_measure(
+        project_id: str,
+        user: dict = Depends(current_user),
+    ) -> dict:
+        project = owned_project(project_id, user["id"])
+        score_path, diagnostics_path, _ = tab_diagnostics_for_project(project)
+        try:
+            diagnostics = append_blank_tab_measure(
+                score_path,
+                diagnostics_path,
+                title=project["title"],
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        summary = diagnostics.get("summary") or {}
+        next_measure = int(summary.get("end_measure") or 1)
+        now = utc_text()
+        with db.connect() as connection:
+            connection.execute(
+                """
+                UPDATE projects SET recognition_summary = ?, status_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(summary, ensure_ascii=False),
+                    f"已添加第 {next_measure} 小节，乐谱已重新生成",
                     now,
                     project_id,
                 ),

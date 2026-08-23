@@ -316,6 +316,7 @@ function LibraryScreen({
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [creatingManual, setCreatingManual] = useState(false);
   const [source, setSource] = useState("");
   const [title, setTitle] = useState("");
   const [rights, setRights] = useState(false);
@@ -351,6 +352,24 @@ function LibraryScreen({
       showNotice({ message: error instanceof Error ? error.message : "创建失败", tone: "error" });
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function createManualTab() {
+    setCreatingManual(true);
+    try {
+      const project = await api.createManualTabProject({
+        title: "未命名六线谱",
+        measure_count: 8,
+        tempo_bpm: 120
+      });
+      setProjects((current) => [project, ...current]);
+      showNotice({ message: "空白六线谱已创建，可以逐弦输入", tone: "success" });
+      onOpen(project.id);
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "空白六线谱创建失败", tone: "error" });
+    } finally {
+      setCreatingManual(false);
     }
   }
 
@@ -393,6 +412,15 @@ function LibraryScreen({
               我确认有权处理该视频；未勾选仍可建草稿，但不能下载。
             </label>
           </form>
+        </section>
+
+        <section className="manual-score-composer">
+          <div className="manual-score-icon"><FileMusic size={22} /></div>
+          <div><span>START FROM SILENCE</span><h2>从空白六线谱开始</h2><p>建立 8 小节、4/4 拍、标准调弦的可播放乐谱，再逐弦输入与保存。</p></div>
+          <button className="secondary-button" type="button" disabled={creatingManual} onClick={() => void createManualTab()}>
+            {creatingManual ? <LoaderCircle size={16} className="spin" /> : <PencilLine size={16} />}
+            新建空白谱
+          </button>
         </section>
 
         <section className="project-section">
@@ -491,6 +519,7 @@ function ProjectWorkspace({
           ? "frames"
           : "video"
       );
+      if (value.recognition_summary?.engine === "tab_manual_editor") setReviewOpen(true);
       initializedViewRef.current = true;
     } else if (previousStatus === "analyzing" && value.video_frames.length) {
       setViewMode("frames");
@@ -548,7 +577,7 @@ function ProjectWorkspace({
   }, [reviewDirty, scoreDirty]);
 
   useEffect(() => {
-    if (!project || action === "recognize" || project.status === "recognizing" || viewMode !== "score" || recognition || project.recognition_summary?.engine !== "tab_cv_tesseract") return;
+    if (!project || action === "recognize" || project.status === "recognizing" || viewMode !== "score" || recognition || !["tab_cv_tesseract", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "")) return;
     let active = true;
     setRecognitionLoadError(null);
     api.recognition(project.id)
@@ -647,6 +676,24 @@ function ProjectWorkspace({
     }
   }
 
+  async function appendReviewedMeasure(): Promise<RecognitionDiagnostics> {
+    if (!project) throw new Error("项目尚未载入");
+    setAction("review-append");
+    try {
+      const diagnostics = await api.appendRecognitionMeasure(project.id);
+      setRecognition(diagnostics);
+      const refreshed = await refresh();
+      setScoreRevision(refreshed.updated_at);
+      showNotice({ message: `已添加第 ${diagnostics.summary.end_measure} 小节`, tone: "success" });
+      return diagnostics;
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "添加小节失败", tone: "error" });
+      throw error;
+    } finally {
+      setAction(null);
+    }
+  }
+
   async function saveRecognitionChanges(changes: Array<{ measure: number; events: RecognitionEvent[] }>) {
     if (!project || !changes.length) return;
     setAction("review-save");
@@ -688,7 +735,7 @@ function ProjectWorkspace({
   }
 
   function closeReview() {
-    if (!reviewDirty || window.confirm("精确网格还有未保存修改。确定关闭并丢弃这些修改吗？")) setReviewOpen(false);
+    if (!reviewDirty || window.confirm("六线谱编辑器还有未保存修改。确定关闭并丢弃这些修改吗？")) setReviewOpen(false);
   }
 
   function changeView(next: "video" | "frames" | "images" | "score") {
@@ -770,9 +817,12 @@ function ProjectWorkspace({
   const effectiveAudioSource = audioSource === "video" && project.video_url ? "video" : project.audio_url ? "uploaded" : "video";
   const analyzedSourceMatches = project.audio_analysis?.source === (effectiveAudioSource === "uploaded" ? "uploaded_audio" : "video_audio");
   const canAlign = Boolean(practiceAudioUrl && hasVisualScore);
-  const canReview = project.recognition_summary?.engine === "tab_cv_tesseract";
+  const isManualTab = project.source_kind === "manual_tab";
+  const canReview = ["tab_cv_tesseract", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "");
   const stageTitle =
-    viewMode === "video"
+    isManualTab
+      ? "六线谱打谱与播放"
+      : viewMode === "video"
       ? "视频选段与谱面框选"
       : viewMode === "frames"
       ? "切片候选帧"
@@ -786,18 +836,23 @@ function ProjectWorkspace({
         <button type="button" className="back-button" onClick={leaveProject}><ArrowLeft size={17} /> 曲库</button>
         <div className="workspace-title">
           <input value={title} onChange={(event) => setTitle(event.target.value)} onBlur={saveTitle} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} aria-label="项目名称" />
-          <span><Save size={12} /> {action === "rename" ? "正在保存" : scoreDirty ? "谱面有修改 · Ctrl/⌘S 保存" : reviewDirty ? "精确校对有未保存修改" : "项目已保存到私人曲库"}</span>
+          <span><Save size={12} /> {action === "rename" ? "正在保存" : scoreDirty ? "谱面有修改 · Ctrl/⌘S 保存" : reviewDirty ? "六线谱有未保存修改" : "项目已保存到私人曲库"}</span>
         </div>
         <div className={`workspace-status ${project.status}`}><i />{STATUS_LABELS[project.status] ?? project.status}</div>
       </header>
 
       <div className="workflow-rail">
-        {[
+        {(isManualTab ? [
+          { number: "01", label: "建立乐谱", complete: true, pending: "" },
+          { number: "02", label: "逐弦打谱", complete: Boolean(project.score_file_url), pending: "等待乐谱" },
+          { number: "03", label: "试听校对", complete: Boolean(project.score_file_url), pending: "等待音符" },
+          { number: "04", label: "音频对齐", complete: project.sync_points.length >= 2, pending: "可选步骤" }
+        ] : [
           { number: "01", label: "获取视频", complete: Boolean(project.video_url), pending: project.source_metadata ? "等待获取" : "先解析信息" },
           { number: "02", label: "切片分析", complete: project.video_frames.length > 0, pending: project.video_url ? "可以选段" : "等待视频" },
           { number: "03", label: "PDF 与乐谱", complete: Boolean(project.pdf_url || project.score_file_url), pending: "等待谱图" },
           { number: "04", label: "音画对齐", complete: project.sync_points.length >= 2, pending: "等待乐谱" }
-        ].map(({ number, label, complete, pending }) => (
+        ]).map(({ number, label, complete, pending }) => (
           <div className={`workflow-step ${complete ? "complete" : ""}`} key={number}>
             <span>{complete ? <Check size={13} /> : number}</span>
             <div><strong>{label}</strong><small>{complete ? "已准备" : pending}</small></div>
@@ -893,19 +948,20 @@ function ProjectWorkspace({
                   </Suspense>
                 )}
                 {reviewOpen && recognition && (
-                  <aside className="inline-review-dock" aria-label="精确网格校对">
-                    <header><div><span>DETAIL EDITOR</span><strong>精确网格校对</strong></div><button type="button" onClick={closeReview} aria-label="关闭精确校对">×</button></header>
+                  <aside className="inline-review-dock" aria-label="六线谱逐弦编辑器">
+                    <header><div><span>TAB EDITOR</span><strong>六线谱逐弦编辑器</strong></div><button type="button" onClick={closeReview} aria-label="关闭六线谱编辑器">×</button></header>
                     <ScoreReviewPanel
                       embedded
                       project={project}
                       diagnostics={recognition}
                       measureNumber={reviewMeasure}
-                      busy={action === "review-save" || action === "review-recognize"}
+                      busy={action === "review-save" || action === "review-recognize" || action === "review-append"}
                       retrying={action === "review-recognize"}
                       onMeasureChange={setReviewMeasure}
                       onDirtyChange={setReviewDirty}
                       onSave={saveReviewedMeasure}
                       onRetryRecognition={retryReviewedMeasure}
+                      onAppendMeasure={appendReviewedMeasure}
                     />
                   </aside>
                 )}
@@ -935,6 +991,13 @@ function ProjectWorkspace({
         </section>
 
         <aside className="inspector">
+          {isManualTab ? (
+            <section className="inspector-section source-section manual-source-section">
+              <div className="inspector-heading"><span><FileMusic size={16} /></span><div><h3>手动六线谱</h3><p>标准调弦 · 4/4 拍 · 十六分网格</p></div></div>
+              <p className="inspector-copy">这份谱不依赖视频。打开编辑器后，上下键选择 1～6 弦，左右键逐格移动，再输入 0～36 品。</p>
+              <button className="secondary-button full" type="button" onClick={() => void openReviewAt()}><PencilLine size={15} /> 打开六线谱编辑器</button>
+            </section>
+          ) : (
           <section className="inspector-section source-section">
             <div className="inspector-heading"><span><Link2 size={16} /></span><div><h3>视频来源</h3><p>{project.source_id}</p></div></div>
             {project.source_metadata ? (
@@ -964,15 +1027,16 @@ function ProjectWorkspace({
             </label>
             {!project.rights_confirmed && <p className="inline-warning"><LockKeyhole size={13} /> 你创建草稿时没有勾选权限确认，现在可以在这里补充确认。</p>}
           </section>
+          )}
 
           <section className="inspector-section">
-            <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>乐谱识别</h3><p>{project.video_frames.length ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
-            <p className="inspector-copy">{project.video_frames.length ? "从原始切片识别弦号、品位和八分音符网格，按小节号去重合成完整 PDF；校对器可用数字键改品位，并添加连音、滑音、击勾弦、推弦等技巧。" : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
+            <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>{isManualTab ? "乐谱结构" : "乐谱识别"}</h3><p>{isManualTab ? "可保存的六线谱事件模型" : project.video_frames.length ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
+            <p className="inspector-copy">{isManualTab ? "同一时间格的六根弦可以组成和弦；删除只影响当前弦。音符、时值和技巧保存后会重建可播放的 MusicXML。" : project.video_frames.length ? "从原始切片识别弦号、品位和八分音符网格，按小节号去重合成完整 PDF；校对器可用数字键改品位，并添加连音、滑音、击勾弦、推弦等技巧。" : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
             {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 数字置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}</p>}
-            <button className="secondary-button full" type="button" title={scoreDirty || reviewDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || reviewDirty || action === "recognize" || project.status === "recognizing" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
+            {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty || reviewDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || reviewDirty || action === "recognize" || project.status === "recognizing" || (project.video_frames.length ? !capabilities.tab_ocr : (!project.pdf_url || !capabilities.audiveris))} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
               {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
               {project.video_frames.length ? (capabilities.tab_ocr ? "识别视频六线 TAB" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}
-            </button>
+            </button>}
           </section>
 
           <section className="inspector-section audio-section">

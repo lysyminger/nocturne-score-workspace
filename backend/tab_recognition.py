@@ -939,7 +939,7 @@ def _build_musicxml(
     ET.SubElement(work, "work-title").text = title
     identification = ET.SubElement(score, "identification")
     encoding = ET.SubElement(identification, "encoding")
-    ET.SubElement(encoding, "software").text = "Nocturne TAB OCR beta"
+    ET.SubElement(encoding, "software").text = "Nocturne TAB Editor"
 
     part_list = ET.SubElement(score, "part-list")
     score_part = ET.SubElement(part_list, "score-part", id="P1")
@@ -1085,6 +1085,60 @@ def _sync_suggestions(frames: list[ParsedFrame]) -> tuple[list[dict], float | No
         return suggestions, None
     tempo = 240 / statistics.median(seconds_per_measure)
     return suggestions, min(300.0, max(30.0, tempo))
+
+
+def create_blank_tab_score(
+    output_dir: Path,
+    *,
+    title: str,
+    measure_count: int = 8,
+    tempo_bpm: float = 120.0,
+) -> TabRecognitionResult:
+    """Create a persistent, playable six-string TAB document for manual entry."""
+    if not 1 <= measure_count <= 128:
+        raise ValueError("空白六线谱的小节数必须在 1～128 之间")
+    if not 30 <= tempo_bpm <= 300:
+        raise ValueError("速度必须在 30～300 BPM 之间")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    measures = {
+        number: MeasureCandidate(number, (), 100.0, 0.0, ())
+        for number in range(1, measure_count + 1)
+    }
+    score_path = output_dir / "manual-tab.musicxml"
+    _build_musicxml(title, measures, score_path, tempo_bpm)
+    summary = {
+        "engine": "tab_manual_editor",
+        "engine_label": "六线谱手动编辑器",
+        "measure_count": measure_count,
+        "start_measure": 1,
+        "end_measure": measure_count,
+        "estimated_tempo_bpm": round(tempo_bpm, 1),
+        "confidence": 1.0,
+        "low_confidence_glyphs": 0,
+        "missing_measures": [],
+        "warnings": [
+            "当前手动谱使用标准六弦调弦、4/4 拍与十六分音符网格",
+        ],
+    }
+    diagnostics = {
+        "summary": summary,
+        "sync_suggestions": [],
+        "parse_errors": [],
+        "frames": [],
+        "measures": [
+            {
+                "number": number,
+                "quality": 100.0,
+                "source_time": 0.0,
+                "events": [],
+            }
+            for number in measures
+        ],
+    }
+    diagnostics_path = output_dir / "recognition.json"
+    diagnostics_path.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
+    return TabRecognitionResult(score_path, diagnostics_path, summary)
 
 
 def recognize_tab_frames(
@@ -1354,6 +1408,77 @@ def update_recognized_measure(
         warnings.append(f"有 {len(missing)} 个小节未获得可靠结果，已在导出谱中留空")
     summary["warnings"] = warnings
     diagnostics["summary"] = summary
+
+    temporary_score = score_path.with_name(f".{score_path.name}.tmp")
+    temporary_diagnostics = diagnostics_path.with_name(f".{diagnostics_path.name}.tmp")
+    _build_musicxml(
+        title,
+        candidates,
+        temporary_score,
+        float(summary.get("estimated_tempo_bpm") or 120),
+    )
+    temporary_diagnostics.write_text(
+        json.dumps(diagnostics, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_score.replace(score_path)
+    temporary_diagnostics.replace(diagnostics_path)
+    return diagnostics
+
+
+def append_blank_tab_measure(
+    score_path: Path,
+    diagnostics_path: Path,
+    *,
+    title: str,
+) -> dict:
+    """Append one empty measure and atomically rebuild the editable MusicXML score."""
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    summary = diagnostics.get("summary") or {}
+    start_measure = int(summary.get("start_measure") or 1)
+    end_measure = int(summary.get("end_measure") or start_measure)
+    if end_measure - start_measure + 1 >= 128:
+        raise ValueError("当前最多支持 128 小节")
+
+    next_number = end_measure + 1
+    measure_rows = diagnostics.setdefault("measures", [])
+    measure_rows.append(
+        {
+            "number": next_number,
+            "quality": 100.0,
+            "source_time": 0.0,
+            "events": [],
+        }
+    )
+    measure_rows.sort(key=lambda row: int(row["number"]))
+    summary["start_measure"] = start_measure
+    summary["end_measure"] = next_number
+    summary["measure_count"] = len(measure_rows)
+    diagnostics["summary"] = summary
+
+    candidates: dict[int, MeasureCandidate] = {}
+    for row in measure_rows:
+        number = int(row["number"])
+        row_events = tuple(
+            TabEvent(
+                float(event["onset_eighths"]),
+                float(event["duration_eighths"]),
+                tuple(_tab_note_from_dict(note) for note in event["notes"]),
+            )
+            for event in row.get("events", [])
+        )
+        signature = tuple(
+            (event.onset, note.string, note.fret)
+            for event in row_events
+            for note in event.notes
+        )
+        candidates[number] = MeasureCandidate(
+            number,
+            row_events,
+            float(row.get("quality") or 0),
+            float(row.get("source_time") or 0),
+            signature,
+        )
 
     temporary_score = score_path.with_name(f".{score_path.name}.tmp")
     temporary_diagnostics = diagnostics_path.with_name(f".{diagnostics_path.name}.tmp")

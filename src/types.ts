@@ -174,7 +174,7 @@ export type Project = {
   id: string;
   title: string;
   source_input: string;
-  source_kind: "bv" | "av";
+  source_kind: "bv" | "av" | "manual_tab";
   source_id: string;
   source_url: string;
   rights_confirmed: boolean;

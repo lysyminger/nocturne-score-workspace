@@ -86,6 +86,51 @@ def test_auth_project_library_and_sync_persistence(client: TestClient):
     assert client.get("/api/projects").json()[0]["title"] == "午夜练习"
 
 
+def test_manual_tab_project_supports_per_string_chords_and_appending_measures(client: TestClient):
+    register(client)
+
+    created = client.post(
+        "/api/projects/manual-tab",
+        json={"title": "手动打谱测试", "measure_count": 2, "tempo_bpm": 108},
+    )
+    assert created.status_code == 201
+    project = created.json()
+    assert project["source_kind"] == "manual_tab"
+    assert project["status"] == "score_ready"
+    assert project["recognition_summary"]["engine"] == "tab_manual_editor"
+    assert client.get(project["score_file_url"]).status_code == 200
+
+    edited = client.patch(
+        f"/api/projects/{project['id']}/recognition/measures/1",
+        json={
+            "events": [
+                {
+                    "onset_eighths": 0.5,
+                    "duration_eighths": 0.5,
+                    "notes": [
+                        {"string": 1, "fret": 7},
+                        {"string": 2, "fret": 8},
+                        {"string": 6, "fret": 5},
+                    ],
+                }
+            ]
+        },
+    )
+    assert edited.status_code == 200
+    assert [note["string"] for note in edited.json()["measures"][0]["events"][0]["notes"]] == [1, 2, 6]
+
+    appended = client.post(f"/api/projects/{project['id']}/recognition/measures")
+    assert appended.status_code == 201
+    assert appended.json()["summary"]["end_measure"] == 3
+    assert appended.json()["measures"][-1]["events"] == []
+
+    persisted = client.get(f"/api/projects/{project['id']}/recognition").json()
+    assert persisted["measures"][0]["events"][0]["notes"][2] == {"string": 6, "fret": 5}
+    retry = client.post(f"/api/projects/{project['id']}/recognition/measures/1/retry")
+    assert retry.status_code == 409
+    assert "没有源视频帧" in retry.json()["detail"]
+
+
 def test_inspect_caches_private_cover_for_library(client: TestClient, monkeypatch):
     register(client)
     project = client.post(

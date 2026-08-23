@@ -1520,7 +1520,7 @@ export function AlphaTabPlayer({
           <button type="button" disabled={editingDisabled || saving} onClick={openCommandPalette} title="命令面板 Ctrl/⌘E"><Command size={15} /><span>命令</span></button>
           <button type="button" aria-label="打开悬浮视频" disabled={!videoUrl} className={referenceMode === "video" ? "active" : ""} onClick={() => openReference("video")}><Video size={15} /><span>视频</span></button>
           <button type="button" aria-label="打开悬浮原帧" disabled={!referenceImage} className={referenceMode === "image" ? "active" : ""} onClick={() => openReference("image")}><ImageIcon size={15} /><span>原帧</span></button>
-          {recognition && <button type="button" aria-label="打开网格校对" className={reviewOpen ? "active" : ""} onClick={onToggleReview}><PencilLine size={15} /><span>网格校对</span></button>}
+          {recognition && <button type="button" aria-label="打开六线谱逐弦编辑器" className={reviewOpen ? "active" : ""} onClick={onToggleReview}><PencilLine size={15} /><span>六线编辑</span></button>}
           <button type="button" aria-label={saving ? "正在保存乐谱" : "保存乐谱"} className={dirty ? "save-needed" : ""} disabled={editingDisabled || !dirty || saving} onClick={() => void saveChanges()}><Save size={15} /><span>{saving ? "保存中" : "保存"}</span></button>
           <details className="score-export-menu">
             <summary aria-label="导出乐谱"><Download size={15} /><span>导出</span></summary>

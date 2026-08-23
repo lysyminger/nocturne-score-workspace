@@ -17,7 +17,9 @@ from backend.tab_recognition import (
     TabNote,
     _build_musicxml,
     _smooth_frame_starts,
+    append_blank_tab_measure,
     assign_rhythm_units,
+    create_blank_tab_score,
     detect_measure_boundaries,
     detect_staff_lines,
     update_recognized_measure,
@@ -203,6 +205,29 @@ def test_musicxml_writes_guitar_techniques_and_link_endpoints(tmp_path):
     assert root.find(".//harmonic/natural") is not None
     assert root.find(".//tied[@type='let-ring']") is not None
     assert root.findtext(".//notehead") == "x"
+
+
+def test_creates_and_extends_playable_blank_tab_score(tmp_path):
+    result = create_blank_tab_score(
+        tmp_path / "manual",
+        title="空白练习",
+        measure_count=3,
+        tempo_bpm=96,
+    )
+
+    diagnostics = append_blank_tab_measure(
+        result.score_path,
+        result.diagnostics_path,
+        title="空白练习",
+    )
+
+    root = ET.parse(result.score_path).getroot()
+    assert result.summary["engine"] == "tab_manual_editor"
+    assert diagnostics["summary"]["end_measure"] == 4
+    assert diagnostics["summary"]["measure_count"] == 4
+    assert len(root.findall(".//part/measure")) == 4
+    assert len(root.findall(".//rest")) == 4
+    assert root.findtext(".//software") == "Nocturne TAB Editor"
 
 
 def test_updates_recognized_measure_and_rebuilds_musicxml(tmp_path):

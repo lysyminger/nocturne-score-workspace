@@ -697,6 +697,7 @@ export function AlphaTabPlayer({
   const preservedScrollTopRef = useRef(0);
   const restoringScrollRef = useRef(false);
   const panelHeightRef = useRef(0);
+  const editableGhostBeatsRef = useRef(new Set<alphaTab.model.Beat>());
 
   const [ready, setReady] = useState(false);
   const [scoreReady, setScoreReady] = useState(false);
@@ -1139,6 +1140,7 @@ export function AlphaTabPlayer({
     let initialScrollTimer: number | null = null;
     scoreRef.current = null;
     midiRef.current = null;
+    editableGhostBeatsRef.current.clear();
     selectedNotesRef.current = [];
     setSelectedIds([]);
     setScoreReady(false);
@@ -1728,6 +1730,7 @@ export function AlphaTabPlayer({
     const entry = historyEntry("添加音符", splittingBeat ? beat.notes : []);
     let noteBeat = beat;
     if (beat.isRest) {
+      editableGhostBeatsRef.current.delete(beat);
       const originalIndex = voice.beats.indexOf(beat);
       if (originalIndex < 0) return true;
       rememberBeat(entry, beat);
@@ -1809,7 +1812,7 @@ export function AlphaTabPlayer({
     const originIndex = beats.indexOf(origin);
     if (originIndex < 0) return null;
     for (let index = originIndex + direction; index >= 0 && index < beats.length; index += direction) {
-      if (!beats[index].isEmpty) return beats[index];
+      if (!beats[index].isEmpty || editableGhostBeatsRef.current.has(beats[index])) return beats[index];
     }
     return null;
   }
@@ -1822,7 +1825,8 @@ export function AlphaTabPlayer({
       setSelection([note], note);
       return;
     }
-    const next = cursorAt(beat, onset, string);
+    const isEditableGhost = beat.isEmpty && editableGhostBeatsRef.current.has(beat);
+    const next = cursorAt(beat, onset, string, isEditableGhost ? "rest" : "string");
     if (!next) return;
     setSelection([]);
     scoreCursorRef.current = next;
@@ -1832,6 +1836,11 @@ export function AlphaTabPlayer({
       entryDurationRef.current = duration;
       setEntryDurationState(duration);
       setEditStatus(`第 ${measureNumberForBeat(beat)} 小节 · 实体休止 ${directDurationLabel(duration)} · 可改时值或 Delete 变灰`);
+    } else if (isEditableGhost) {
+      const duration = beatDurationEighths(beat);
+      entryDurationRef.current = duration;
+      setEntryDurationState(duration);
+      setEditStatus(`第 ${measureNumberForBeat(beat)} 小节 · 灰色休止预览 ${directDurationLabel(duration)} · Enter 确认为实体`);
     } else setEditStatus(status);
   }
 
@@ -1893,6 +1902,7 @@ export function AlphaTabPlayer({
         return true;
       }
       beat.isEmpty = false;
+      editableGhostBeatsRef.current.delete(beat);
       if (measure) {
         const target = measure.events.find((event) => event.rest && Math.abs(event.onset_eighths - cursor.onset) < 1e-9);
         if (target) target.duration_eighths = duration;
@@ -2020,8 +2030,12 @@ export function AlphaTabPlayer({
     }
     entryDurationRef.current = duration;
     setEntryDurationState(duration);
-    clearScoreCursor();
-    commitEdit(`第 ${measureNumber} 小节休止已删除为透明空位，不计入小节拍数`, entry, []);
+    editableGhostBeatsRef.current.add(beat);
+    const preview = { ...cursor, kind: "rest" as const };
+    scoreCursorRef.current = preview;
+    setScoreCursor(preview);
+    commitEdit(`第 ${measureNumber} 小节休止已变为灰色预览，离开光标后隐藏`, entry, []);
+    setEditStatus(`第 ${measureNumber} 小节 · 灰色休止预览 ${directDurationLabel(duration)} · ←/→ 移动，Enter 确认为实体`);
     return true;
   }
 
@@ -2333,6 +2347,7 @@ export function AlphaTabPlayer({
     }
     const entry = historyEntry("删除音符", selected);
     const touchedBeats = uniqueBeats(selected);
+    for (const beat of touchedBeats) rememberBeat(entry, beat);
     const touchedEvents = new Map<RecognitionMeasure, Set<RecognitionEvent>>();
     digitBufferRef.current = null;
     digitHistoryEntryRef.current = null;
@@ -2356,14 +2371,32 @@ export function AlphaTabPlayer({
       detachNoteRelations(note);
       note.beat.removeNote(note);
     }
-    for (const beat of touchedBeats) if (!beat.notes.length) beat.isEmpty = true;
+    for (const beat of touchedBeats) if (!beat.notes.length) {
+      beat.isEmpty = true;
+      editableGhostBeatsRef.current.add(beat);
+    }
     for (const [measure, events] of touchedEvents) {
       measure.events = measure.events.filter((event) => !events.has(event) || event.notes.length > 0);
       dirtyRecognitionMeasuresRef.current.add(measure.number);
     }
     const emptyColumns = touchedBeats.filter((beat) => beat.isEmpty).length;
+    const previewBeat = [...touchedBeats].reverse().find((beat) => beat.isEmpty);
+    const previewCursor = previewBeat ? cursorAt(
+      previewBeat,
+      Math.round(previewBeat.playbackStart / EIGHTH_NOTE_TICKS * 2) / 2,
+      Math.max(1, Math.ceil((previewBeat.voice.bar.staff.tuning.length || 6) / 2)),
+      "rest"
+    ) : null;
     commitEdit(`已删除 ${selected.length} 个音${emptyColumns ? ` · ${emptyColumns} 列变为透明空位` : ""}`, entry, selected);
     setSelection([]);
+    if (previewBeat && previewCursor) {
+      const duration = beatDurationEighths(previewBeat);
+      entryDurationRef.current = duration;
+      setEntryDurationState(duration);
+      scoreCursorRef.current = previewCursor;
+      setScoreCursor(previewCursor);
+      setEditStatus(`删除位置显示灰色休止预览 · ←/→ 移动，Enter 确认为实体`);
+    }
   }
 
   function undoLastEdit() {
@@ -2374,6 +2407,10 @@ export function AlphaTabPlayer({
     digitHistoryEntryRef.current = null;
     for (const state of entry.states) restoreNoteState(state);
     for (const state of entry.beatStates) restoreBeatState(state);
+    for (const state of entry.beatStates) {
+      if (state.beat.isEmpty) editableGhostBeatsRef.current.add(state.beat);
+      else editableGhostBeatsRef.current.delete(state.beat);
+    }
     recognitionDraftRef.current = cloneMeasureDraft(entry.recognition);
     dirtyRecognitionMeasuresRef.current = new Set(entry.dirtyRecognitionMeasures);
     const remaining = history.slice(0, -1);

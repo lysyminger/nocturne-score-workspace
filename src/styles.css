@@ -740,7 +740,7 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .score-selection-layer .score-cell-cursor::before { content: ""; position: absolute; top: 50%; left: 3px; right: 3px; height: 1px; background: #7268d9; transform: translateY(-50%); }
 .score-selection-layer .score-cell-cursor::after { background: #7268d9; }
 .score-selection-layer .score-cell-cursor.rest-column { border-radius: .3rem; background: rgba(118,105,231,.09); }
-.score-selection-layer .score-cell-cursor > .rest-preview { position: absolute; left: 50%; bottom: calc(100% + .12rem); min-width: 2.1rem; display: grid; justify-items: center; gap: .06rem; color: rgba(92,92,101,.76); text-shadow: 0 1px rgba(255,255,255,.78); transform: translateX(-50%); }
+.score-selection-layer .score-cell-cursor > .rest-preview { position: absolute; left: 50%; bottom: calc(100% + .12rem); min-width: 2.1rem; display: grid; justify-items: center; gap: .06rem; color: rgba(112,112,124,.48); transform: translateX(-50%); }
 .score-selection-layer .rest-preview > span { min-height: 1rem; font: 500 1rem/1 "Bravura", "Segoe UI Symbol", serif; }
 .score-selection-layer .rest-preview > small { padding: .08rem .24rem; border-radius: .22rem; color: rgba(88,88,98,.82); font: 650 .42rem/1 system-ui; background: rgba(239,238,234,.88); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .score-selection-layer .measure-error-marker {

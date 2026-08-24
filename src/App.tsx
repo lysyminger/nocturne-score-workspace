@@ -604,7 +604,7 @@ function ProjectWorkspace({
   }, [scoreDirty]);
 
   useEffect(() => {
-    if (!project || action === "recognize" || project.status === "recognizing" || viewMode !== "score" || recognition || !["tab_cv_tesseract", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "")) return;
+    if (!project || action === "recognize" || project.status === "recognizing" || viewMode !== "score" || recognition || !["tab_cv_tesseract", "tab_cv_ai", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "")) return;
     let active = true;
     setRecognitionLoadError(null);
     api.recognition(project.id)

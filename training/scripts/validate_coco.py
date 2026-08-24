@@ -11,6 +11,7 @@ from PIL import Image
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate the music-symbol COCO dataset")
     parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--classes", type=Path)
     return parser.parse_args()
 
 
@@ -52,7 +53,8 @@ def validate_split(dataset: Path, split: str, expected_classes: list[str]) -> tu
 def main() -> None:
     args = parse_args()
     training_root = Path(__file__).resolve().parents[1]
-    classes = yaml.safe_load((training_root / "configs" / "symbol_classes.yaml").read_text(encoding="utf-8"))["classes"]
+    classes_path = args.classes or training_root / "configs" / "symbol_classes.yaml"
+    classes = yaml.safe_load(classes_path.read_text(encoding="utf-8"))["classes"]
     train_count = validate_split(args.dataset.resolve(), "train", classes)
     val_count = validate_split(args.dataset.resolve(), "val", classes)
     print(f"COCO dataset valid: train={train_count[0]} images/{train_count[1]} boxes, val={val_count[0]} images/{val_count[1]} boxes")

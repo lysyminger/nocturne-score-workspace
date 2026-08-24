@@ -40,10 +40,33 @@ TAB_TECHNIQUES = frozenset(
 
 
 @dataclass
+class ExactTabToken:
+    x: float
+    string: int
+    text: str
+    box: tuple[int, int, int, int]
+
+
+@dataclass
+class ExactMeasureLabel:
+    x: float
+    text: str
+
+
+@dataclass
+class ExactRestToken:
+    x: float
+    duration_units: float
+
+
+@dataclass
 class FrameInput:
     path: Path
     time_seconds: float
     source_frame: int = 0
+    exact_tokens: tuple[ExactTabToken, ...] = ()
+    exact_measure_labels: tuple[ExactMeasureLabel, ...] = ()
+    exact_rests: tuple[ExactRestToken, ...] = ()
 
 
 @dataclass
@@ -65,6 +88,7 @@ class NoteToken:
     duration_units: float | None = None
     raw_text: str | None = None
     raw_confidence: float = 0.0
+    technique: str | None = None
 
     @property
     def text(self) -> str | None:
@@ -112,6 +136,7 @@ class ParsedFrame:
     tempo_candidates: list[tuple[float, float]] = field(default_factory=list)
     ai_recognized_tokens: int = 0
     ai_error: str | None = None
+    exact_rests: tuple[ExactRestToken, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -426,6 +451,48 @@ def extract_note_tokens(
     return sorted(tokens, key=lambda token: (token.x, token.string))
 
 
+def exact_note_tokens(
+    gray: np.ndarray, source_tokens: tuple[ExactTabToken, ...]
+) -> list[NoteToken]:
+    tokens: list[NoteToken] = []
+    for source in source_tokens:
+        left, top, width, height = source.box
+        left = max(0, min(gray.shape[1] - 1, left))
+        top = max(0, min(gray.shape[0] - 1, top))
+        right = max(left + 1, min(gray.shape[1], left + width))
+        bottom = max(top + 1, min(gray.shape[0], top + height))
+        foreground = ((gray[top:bottom, left:right] < 225) * 255).astype(np.uint8)
+        text = source.text.upper()
+        labelled_text = "0" if text == "X" else text
+        glyphs: list[DigitGlyph] = []
+        for index, label in enumerate(labelled_text):
+            glyph_left = round(index * foreground.shape[1] / len(labelled_text))
+            glyph_right = round((index + 1) * foreground.shape[1] / len(labelled_text))
+            glyph_image = foreground[:, glyph_left:max(glyph_left + 1, glyph_right)]
+            glyphs.append(
+                DigitGlyph(
+                    glyph_image,
+                    _glyph_feature(glyph_image),
+                    label=label,
+                    confidence=100.0,
+                    raw_label=label,
+                    raw_confidence=100.0,
+                    box=(left + glyph_left, top, max(1, glyph_right - glyph_left), bottom - top),
+                )
+            )
+        tokens.append(
+            NoteToken(
+                x=source.x,
+                string=source.string,
+                glyphs=glyphs,
+                raw_text=labelled_text,
+                raw_confidence=100.0,
+                technique="dead_note" if text == "X" else None,
+            )
+        )
+    return sorted(tokens, key=lambda token: (token.x, token.string))
+
+
 def assign_rhythm_units(
     gray: np.ndarray, staff_lines: list[int], tokens: list[NoteToken]
 ) -> None:
@@ -649,8 +716,26 @@ def parse_frame(source: FrameInput) -> ParsedFrame:
     if len(measures) < 2:
         raise ValueError("切片内可用的完整小节少于 2 个")
     effective_boundaries = [measures[0].left, *(measure.right for measure in measures)]
-    tokens = extract_note_tokens(gray, staff_lines)
+    tokens = (
+        exact_note_tokens(gray, source.exact_tokens)
+        if source.exact_tokens
+        else extract_note_tokens(gray, staff_lines)
+    )
     assign_rhythm_units(gray, staff_lines, tokens)
+    if source.exact_measure_labels:
+        for label in source.exact_measure_labels:
+            containing = [
+                index
+                for index, measure in enumerate(measures)
+                if measure.left <= label.x < measure.right
+                and label.x - measure.left <= min(measure.right - measure.left, spacing * 6)
+            ]
+            index = containing[0] if containing else min(
+                range(len(measures)), key=lambda value: abs(measures[value].left - label.x)
+            )
+            if containing or abs(measures[index].left - label.x) <= spacing * 3:
+                measures[index].raw_label = label.text
+                measures[index].raw_label_confidence = 100.0
     return ParsedFrame(
         source=source,
         gray=gray,
@@ -661,6 +746,7 @@ def parse_frame(source: FrameInput) -> ParsedFrame:
         layout=layout.layout,
         polarity=layout.polarity,
         notation_staff_lines=layout.notation_staff_lines,
+        exact_rests=source.exact_rests,
     )
 
 
@@ -732,7 +818,7 @@ def _run_frame_ocr(
     vision_model_url: str | None = None,
 ) -> None:
     targets: list[tuple[str, int, np.ndarray]] = []
-    for index, token in enumerate(frame.tokens):
+    for index, token in enumerate(frame.tokens if not frame.source.exact_tokens else []):
         gap = 4
         token_width = sum(glyph.image.shape[1] for glyph in token.glyphs) + gap * (len(token.glyphs) - 1)
         token_height = max(glyph.image.shape[0] for glyph in token.glyphs)
@@ -858,7 +944,7 @@ def _run_frame_ocr(
         measure.raw_label = text
         measure.raw_label_confidence = readings[text]
 
-    if vision_model_url:
+    if vision_model_url and not frame.source.exact_tokens:
         _run_ai_token_ocr(frame, vision_model_url)
 
 
@@ -1191,14 +1277,24 @@ def _candidate_from_geometry(
         fret = int(text)
         if fret > 36:
             continue
-        note = TabNote(string=token.string, fret=fret)
+        note = TabNote(string=token.string, fret=fret, technique=token.technique)
         if token_groups and abs(token.x - token_groups[-1][0][0].x) <= spacing * 0.45:
             token_groups[-1].append((token, note))
         else:
             token_groups.append([(token, note)])
         confidences.append(token.confidence)
 
-    group_centers = [statistics.mean(token.x for token, _note in group) for group in token_groups]
+    sequence_items: list[tuple[float, list[tuple[NoteToken, TabNote]], float | None]] = [
+        (statistics.mean(token.x for token, _note in group), group, None)
+        for group in token_groups
+    ]
+    sequence_items.extend(
+        (rest.x, [], rest.duration_units)
+        for rest in frame.exact_rests
+        if geometry.left <= rest.x < geometry.right
+    )
+    sequence_items.sort(key=lambda item: item[0])
+    group_centers = [center for center, _group, _duration in sequence_items]
     group_techniques: dict[int, str] = {}
     for mark in frame.technique_marks:
         if not (geometry.left - spacing * 2 <= mark.x < geometry.right):
@@ -1217,21 +1313,26 @@ def _candidate_from_geometry(
     events: list[TabEvent] = []
     signature_items: list[tuple[float, int, int]] = []
     cursor = 0.0
-    for group_index, group in enumerate(token_groups):
+    for group_index, (_center, group, exact_duration) in enumerate(sequence_items):
         durations = [token.duration_units for token, _note in group if token.duration_units]
-        if durations:
+        if exact_duration is not None:
+            duration = exact_duration
+        elif durations:
             duration = max(0.5, round(statistics.median(durations) * 2) / 2)
-        elif len(token_groups) >= 6:
+        elif len(sequence_items) >= 6:
             duration = 1
         else:
-            duration = max(1, round(EIGHTH_UNITS_PER_MEASURE / max(1, len(token_groups))))
+            duration = max(1, round(EIGHTH_UNITS_PER_MEASURE / max(1, len(sequence_items))))
         if cursor >= EIGHTH_UNITS_PER_MEASURE:
             break
         duration = min(duration, EIGHTH_UNITS_PER_MEASURE - cursor)
         technique = group_techniques.get(group_index)
         notes = tuple(
             sorted(
-                {TabNote(note.string, note.fret, technique) for _token, note in group},
+                {
+                    TabNote(note.string, note.fret, technique or note.technique)
+                    for _token, note in group
+                },
                 key=lambda note: note.string,
             )
         )
@@ -1701,13 +1802,14 @@ def recognize_tab_frames(
     for frame_index, source in enumerate(ordered_frames, start=1):
         try:
             frame = parse_frame(source)
-            _run_frame_ocr(
-                frame,
-                output_dir / ".ocr",
-                tesseract_path,
-                vision_model_url if recognition_mode == "ai" else None,
-            )
-            _run_technique_ocr(frame, output_dir / ".ocr", tesseract_path)
+            if not source.exact_tokens:
+                _run_frame_ocr(
+                    frame,
+                    output_dir / ".ocr",
+                    tesseract_path,
+                    vision_model_url if recognition_mode == "ai" else None,
+                )
+                _run_technique_ocr(frame, output_dir / ".ocr", tesseract_path)
             _infer_frame_start(frame)
             parsed.append(frame)
         except Exception as exc:
@@ -1724,6 +1826,16 @@ def recognize_tab_frames(
     _smooth_frame_starts(parsed)
     _cluster_and_label_glyphs(parsed)
     measures, unresolved = _collect_measures(parsed)
+    if measures and any(frame.source.exact_tokens for frame in parsed):
+        for number in range(min(measures), max(measures) + 1):
+            if number not in measures:
+                measures[number] = MeasureCandidate(
+                    number=number,
+                    events=(),
+                    quality=100.0,
+                    source_time=0.0,
+                    signature=(),
+                )
     note_measure_count = sum(bool(measure.events) for measure in measures.values())
     if note_measure_count < 2:
         raise RuntimeError("识别出的有效小节少于 2 个，请重新框选更清晰的 TAB 区域")

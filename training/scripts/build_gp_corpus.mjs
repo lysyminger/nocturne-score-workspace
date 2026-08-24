@@ -158,6 +158,12 @@ function serializeLookup(lookup) {
             voice_index: beat.voice?.index ?? null,
             duration: beat.duration,
             dots: beat.dots,
+            display_start_ticks: beat.displayStart,
+            display_duration_ticks: beat.displayDuration,
+            playback_start_ticks: beat.playbackStart,
+            playback_duration_ticks: beat.playbackDuration,
+            absolute_display_start_ticks: beat.absoluteDisplayStart,
+            absolute_playback_start_ticks: beat.absolutePlaybackStart,
             is_rest: beat.isRest,
             is_full_bar_rest: beat.isFullBarRest,
             is_empty: beat.isEmpty,
@@ -179,6 +185,8 @@ function serializeLookup(lookup) {
       }
       masterBars.push({
         master_bar_index: masterBar.index,
+        time_signature_numerator: masterBar.bars[0]?.bar?.masterBar?.timeSignatureNumerator ?? null,
+        time_signature_denominator: masterBar.bars[0]?.bar?.masterBar?.timeSignatureDenominator ?? null,
         is_first_of_line: masterBar.isFirstOfLine,
         visual_box: serializeBounds(masterBar.visualBounds),
         real_box: serializeBounds(masterBar.realBounds),
@@ -344,7 +352,7 @@ async function main() {
           const labelPath = path.join(sourceDir, `${stem}.labels.json`);
           fs.writeFileSync(imagePath, rendered.png);
           writeJson(labelPath, {
-            schema_version: 1,
+            schema_version: 2,
             source_id: sourceId,
             track_index: trackIndex,
             track: trackSummary(score.tracks[trackIndex]),

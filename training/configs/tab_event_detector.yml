@@ -1,0 +1,48 @@
+_BASE_:
+  - ../vendor/PaddleDetection/configs/ppyoloe/ppyoloe_plus_crn_s_80e_coco.yml
+
+use_gpu: true
+epoch: 40
+snapshot_epoch: 2
+log_iter: 20
+save_dir: ../../runs/tab-event-detector
+num_classes: 24
+
+TrainDataset:
+  name: COCODataSet
+  image_dir: images/train
+  anno_path: annotations/train.json
+  dataset_dir: ../../data/tab-events
+  data_fields: [image, gt_bbox, gt_class, is_crowd]
+
+EvalDataset:
+  name: COCODataSet
+  image_dir: images/val
+  anno_path: annotations/val.json
+  dataset_dir: ../../data/tab-events
+  allow_empty: true
+
+TestDataset:
+  name: ImageFolder
+  anno_path: annotations/test.json
+  dataset_dir: ../../data/tab-events
+
+worker_num: 0
+TrainReader:
+  sample_transforms:
+    - Decode: {}
+    - RandomDistort: {}
+  batch_transforms:
+    - BatchRandomResize:
+        target_size: [640, 704, 768, 832, 896]
+        random_size: true
+        random_interp: true
+        keep_ratio: false
+    - NormalizeImage: {mean: [0., 0., 0.], std: [1., 1., 1.], norm_type: none}
+    - Permute: {}
+    - PadGT: {}
+  batch_size: 2
+  shuffle: true
+  drop_last: true
+  use_shared_memory: false
+  collate_batch: true

@@ -72,6 +72,25 @@ GP 的音符、品位、弦号、时值与技巧来自原始结构化数据；al
 
 PDF 切片属于弱标注，必须抽样复核后才能进入符号检测训练集。PaddleOCR 的原始训练说明仍以 `training/vendor/PaddleOCR/docs/` 中的官方文档为准。
 
+## 完整 TAB 事件训练与验收
+
+单字符准确率不能代表整谱正确率。完整链路把任务拆成品位位置、完整品位分类和节奏三项，并按歌曲隔离训练、验证、测试：
+
+```powershell
+node .\training\scripts\build_gp_corpus.mjs --source "D:\document\谱子" --profile tab
+.\training\.venv-paddle\Scripts\python.exe .\training\scripts\build_tab_event_dataset.py
+.\training\.venv-paddle\Scripts\python.exe .\training\scripts\build_vector_pdf_fret_corpus.py --source "D:\document\谱子"
+powershell -ExecutionPolicy Bypass -File .\training\train_tab_event_detector.ps1
+powershell -ExecutionPolicy Bypass -File .\training\finetune_pdf_fret_detector.ps1
+powershell -ExecutionPolicy Bypass -File .\training\train_pdf_fret_location.ps1
+.\training\.venv-paddle\Scripts\python.exe .\training\scripts\train_fret_classifier.py
+.\training\.venv-paddle\Scripts\python.exe .\training\scripts\train_rhythm_model.py
+```
+
+阈值只能在验证集选择，再固定到未参与调参的整首测试谱。部署门槛同时检查品位位置 F1、同一拍和弦事件 F1、完整品位准确率和节奏正确率；任何一项未到目标都不能用合成集或单字符结果代替。
+
+对含嵌入文本和绘图坐标的 Guitar Pro 导出 PDF，网站优先直接读取矢量品位、弦位、小节号、休止符和开头 BPM；扫描 PDF 与视频帧才进入视觉模型。矢量直读避免先转图片再 OCR 造成的坐标损失，但连音、反复和未重复打印的和弦仍需单独的语义标注与真实谱评估。
+
 ## 服务器真实视频切片
 
 服务器切片同步到 `training/data/real-video/` 后，先作为独立真实域测试/校对集，不要直接混入训练集：

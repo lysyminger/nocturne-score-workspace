@@ -9,6 +9,7 @@ data/
 .env
 .deploy/
 .diagnostics/
+tmp/
 training/.venv-*/
 training/.cache-*/
 training/vendor/

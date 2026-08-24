@@ -31,6 +31,9 @@ from backend.score_pdf import build_slice_preview_pdf
 from backend.security import hash_password, hash_session_token, new_session_token, verify_password
 from backend.tab_recognition import FrameInput as TabFrameInput
 from backend.tab_recognition import (
+    ExactMeasureLabel,
+    ExactRestToken,
+    ExactTabToken,
     append_blank_tab_measure,
     create_blank_tab_score,
     detect_tempo_from_images,
@@ -1084,6 +1087,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "time_seconds": sequence_seconds,
                 "source_frame": index + 1,
                 "source_kind": "pdf_system",
+                "exact_tokens": [
+                    {
+                        "x": token.x,
+                        "string": token.string,
+                        "text": token.text,
+                        "box": list(token.box),
+                    }
+                    for token in system.exact_tokens
+                ],
+                "exact_measure_labels": [
+                    {"x": label.x, "text": label.text}
+                    for label in system.exact_measure_labels
+                ],
+                "exact_rests": [
+                    {"x": rest.x, "duration_units": rest.duration_units}
+                    for rest in system.exact_rests
+                ],
             }
             system_rows.append(
                 (
@@ -1098,7 +1118,16 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     now,
                 )
             )
-            tab_frames.append(TabFrameInput(system.path, sequence_seconds, index + 1))
+            tab_frames.append(
+                TabFrameInput(
+                    system.path,
+                    sequence_seconds,
+                    index + 1,
+                    exact_tokens=system.exact_tokens,
+                    exact_measure_labels=system.exact_measure_labels,
+                    exact_rests=system.exact_rests,
+                )
+            )
 
         preliminary_summary = {
             "engine": "pdf_layout",
@@ -1106,6 +1135,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "page_count": len(imported.pages),
             "system_count": len(imported.systems),
             "layout_counts": imported.layout_counts,
+            "vector_tab_tokens": sum(len(system.exact_tokens) for system in imported.systems),
+            "estimated_tempo_bpm": imported.tempo_bpm,
+            "tempo_source": "pdf_vector" if imported.tempo_bpm is not None else None,
             "warnings": ["PDF 已按谱行切分；自动识别结果仍需逐小节试听校对"],
         }
         if tab_frames and capabilities["tab_ocr"]:
@@ -1136,13 +1168,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             connection.execute(
                 """
                 UPDATE projects SET score_pdf_path = ?, score_file_path = NULL, score_file_name = NULL,
-                    recognition_summary = ?, status = ?, status_message = ?, updated_at = ? WHERE id = ?
+                    recognition_summary = ?, status = ?, status_message = ?,
+                    tempo_bpm = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_bpm ELSE ? END,
+                    tempo_source = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_source ELSE 'pdf_vector' END,
+                    updated_at = ? WHERE id = ?
                 """,
                 (
                     str(pdf_path),
                     json.dumps(preliminary_summary, ensure_ascii=False),
                     next_status,
                     status_message,
+                    imported.tempo_bpm,
+                    imported.tempo_bpm,
+                    imported.tempo_bpm,
                     now,
                     project_id,
                 ),
@@ -1506,11 +1544,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         try:
             with db.connect() as connection:
                 tempo_row = connection.execute(
-                    "SELECT tempo_bpm, tempo_locked FROM projects WHERE id = ?", (project_id,)
+                    "SELECT tempo_bpm, tempo_locked, tempo_source FROM projects WHERE id = ?", (project_id,)
                 ).fetchone()
-            locked_tempo = (
+            supplied_tempo = (
                 float(tempo_row["tempo_bpm"])
-                if tempo_row and tempo_row["tempo_locked"] and tempo_row["tempo_bpm"] is not None
+                if tempo_row
+                and tempo_row["tempo_bpm"] is not None
+                and (tempo_row["tempo_locked"] or tempo_row["tempo_source"] == "pdf_vector")
                 else None
             )
             last_progress = 0
@@ -1532,7 +1572,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 output_dir,
                 title=title,
                 tesseract_path=tesseract_path,
-                tempo_bpm=locked_tempo,
+                tempo_bpm=supplied_tempo,
                 recognition_mode=recognition_mode,
                 vision_model_url=os.getenv("NOCTURNE_VISION_MODEL"),
                 progress_callback=update_progress,
@@ -1547,7 +1587,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 summary["page_count"] = existing_summary.get("page_count")
                 summary["system_count"] = existing_summary.get("system_count")
                 summary["source_kind"] = "pdf"
-                summary["engine_label"] = "PDF 六线 TAB 专用识别（Beta）"
+                vector_tab_tokens = int(existing_summary.get("vector_tab_tokens") or 0)
+                summary["vector_tab_tokens"] = vector_tab_tokens
+                summary["engine_label"] = (
+                    "PDF 矢量坐标 + 节奏识别"
+                    if vector_tab_tokens
+                    else "PDF 六线 TAB 专用识别（Beta）"
+                )
             recognized_tempo = summary.get("estimated_tempo_bpm")
             recognized_tempo = float(recognized_tempo) if recognized_tempo is not None else None
             recognized_tempo_source = str(summary.get("tempo_source") or "recognition")
@@ -1621,11 +1667,52 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             metadata = json_object(frame_row["metadata"]) or {}
             path = Path(frame_row["stored_path"])
             if path.is_file():
+                exact_tokens = []
+                for token in metadata.get("exact_tokens") or []:
+                    try:
+                        box = tuple(int(value) for value in token["box"])
+                        if len(box) != 4:
+                            continue
+                        exact_tokens.append(
+                            ExactTabToken(
+                                x=float(token["x"]),
+                                string=int(token["string"]),
+                                text=str(token["text"]),
+                                box=box,
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                exact_measure_labels = []
+                for label in metadata.get("exact_measure_labels") or []:
+                    try:
+                        exact_measure_labels.append(
+                            ExactMeasureLabel(
+                                x=float(label["x"]),
+                                text=str(label["text"]),
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                exact_rests = []
+                for rest in metadata.get("exact_rests") or []:
+                    try:
+                        exact_rests.append(
+                            ExactRestToken(
+                                x=float(rest["x"]),
+                                duration_units=float(rest["duration_units"]),
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
                 tab_frames.append(
                     TabFrameInput(
                         path=path,
                         time_seconds=float(metadata.get("time_seconds") or 0),
                         source_frame=int(metadata.get("source_frame") or frame_row["sort_order"]),
+                        exact_tokens=tuple(exact_tokens),
+                        exact_measure_labels=tuple(exact_measure_labels),
+                        exact_rests=tuple(exact_rests),
                     )
                 )
 

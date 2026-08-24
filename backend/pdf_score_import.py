@@ -2,17 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import cv2
 import fitz
 import numpy as np
 
-from backend.tab_recognition import detect_score_layout
+from backend.tab_recognition import ExactMeasureLabel, ExactRestToken, ExactTabToken, detect_score_layout
 
 
 MAX_PDF_PAGES = 80
 MAX_RENDERED_PAGE_PIXELS = 24_000_000
 PDF_RENDER_SCALE = 2.0
+VECTOR_TAB_TOKEN = re.compile(r"^[<(\[]?(X|x|\d{1,2})[>)\]]?$")
+VECTOR_REST_DURATIONS = {
+    "\ue4e3": 8.0,
+    "\ue4e4": 4.0,
+    "\ue4e5": 2.0,
+    "\ue4e6": 1.0,
+    "\ue4e7": 0.5,
+    "\ue4e8": 0.25,
+}
 
 
 @dataclass(frozen=True)
@@ -30,6 +40,9 @@ class PdfScoreSystem:
     system_number: int
     layout: str
     polarity: str
+    exact_tokens: tuple[ExactTabToken, ...] = ()
+    exact_measure_labels: tuple[ExactMeasureLabel, ...] = ()
+    exact_rests: tuple[ExactRestToken, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,7 @@ class PdfScoreImport:
     pages: tuple[PdfPage, ...]
     systems: tuple[PdfScoreSystem, ...]
     layout_counts: dict[str, int]
+    tempo_bpm: float | None = None
 
 
 def _group_runs(indices: np.ndarray) -> list[list[int]]:
@@ -147,6 +161,157 @@ def _system_crops(gray: np.ndarray) -> list[tuple[int, int]]:
     return crops
 
 
+def _covered_length(segments: list[tuple[float, float]]) -> float:
+    merged: list[list[float]] = []
+    for start, end in sorted((min(left, right), max(left, right)) for left, right in segments):
+        if not merged or start > merged[-1][1] + 1:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return sum(end - start for start, end in merged)
+
+
+def _vector_system_crops(
+    page: fitz.Page, page_height: int
+) -> list[tuple[int, int, list[float]]]:
+    by_y: dict[float, list[tuple[float, float]]] = {}
+    for drawing in page.get_drawings():
+        for item in drawing["items"]:
+            if item[0] != "l":
+                continue
+            start, end = item[1], item[2]
+            if abs(start.y - end.y) > 0.3 or abs(start.x - end.x) < 2:
+                continue
+            key = round((start.y + end.y) * 2) / 4
+            by_y.setdefault(key, []).append((start.x, end.x))
+    rows = sorted(
+        y
+        for y, segments in by_y.items()
+        if _covered_length(segments) >= 70
+    )
+    groups: list[list[float]] = []
+    used: set[int] = set()
+    for index in range(len(rows) - 5):
+        if any(position in used for position in range(index, index + 6)):
+            continue
+        group = rows[index:index + 6]
+        gaps = np.diff(group)
+        spacing = float(np.median(gaps))
+        if not 4 <= spacing <= 12 or max(abs(float(value) - spacing) for value in gaps) > 0.8:
+            continue
+        groups.append(group)
+        used.update(range(index, index + 6))
+    crops: list[tuple[int, int, list[float]]] = []
+    for index, group in enumerate(groups):
+        spacing = float(np.median(np.diff(group))) * PDF_RENDER_SCALE
+        first = group[0] * PDF_RENDER_SCALE
+        last = group[-1] * PDF_RENDER_SCALE
+        top = max(0, round(first - spacing * 15))
+        bottom = min(page_height, round(last + spacing * 5))
+        if index:
+            previous_last = groups[index - 1][-1] * PDF_RENDER_SCALE
+            top = max(top, round((previous_last + first) / 2))
+        if index + 1 < len(groups):
+            next_first = groups[index + 1][0] * PDF_RENDER_SCALE
+            bottom = min(bottom, round((last + next_first) / 2))
+        if bottom - top >= spacing * 7:
+            crops.append(
+                (
+                    top,
+                    bottom,
+                    [value * PDF_RENDER_SCALE - top for value in group],
+                )
+            )
+    return crops
+
+
+def _vector_tab_tokens(
+    words: list[tuple],
+    staff_lines: list[int],
+    crop_top: int,
+    crop_left: int,
+    crop_width: int,
+) -> tuple[ExactTabToken, ...]:
+    spacing = float(np.median(np.diff(staff_lines)))
+    tokens: list[ExactTabToken] = []
+    for word in words:
+        x1, y1, x2, y2, raw_text = word[:5]
+        text = str(raw_text).strip().replace(" ", "")
+        match = VECTOR_TAB_TOKEN.match(text)
+        if not match:
+            continue
+        value = match.group(1).upper()
+        if value != "X" and int(value) > 36:
+            continue
+        left = round(x1 * PDF_RENDER_SCALE) - crop_left
+        right = round(x2 * PDF_RENDER_SCALE) - crop_left
+        top = round(y1 * PDF_RENDER_SCALE) - crop_top
+        bottom = round(y2 * PDF_RENDER_SCALE) - crop_top
+        center_x = (left + right) / 2
+        center_y = (top + bottom) / 2
+        if right <= 0 or left >= crop_width:
+            continue
+        string_index = min(range(6), key=lambda index: abs(staff_lines[index] - center_y))
+        if abs(staff_lines[string_index] - center_y) > max(1.8, spacing * 0.30):
+            continue
+        tokens.append(
+            ExactTabToken(
+                x=center_x,
+                string=string_index + 1,
+                text=value,
+                box=(left, top, max(1, right - left), max(1, bottom - top)),
+            )
+        )
+    return tuple(sorted(tokens, key=lambda token: (token.x, token.string)))
+
+
+def _vector_measure_labels(
+    words: list[tuple],
+    staff_lines: list[float],
+    crop_top: int,
+    crop_left: int,
+    crop_width: int,
+) -> tuple[ExactMeasureLabel, ...]:
+    spacing = float(np.median(np.diff(staff_lines)))
+    labels: list[ExactMeasureLabel] = []
+    for word in words:
+        x1, y1, x2, y2, raw_text = word[:5]
+        text = str(raw_text).strip()
+        if not text.isdigit() or int(text) > 1000:
+            continue
+        center_x = (x1 + x2) * PDF_RENDER_SCALE / 2 - crop_left
+        center_y = (y1 + y2) * PDF_RENDER_SCALE / 2 - crop_top
+        if not 0 <= center_x < crop_width:
+            continue
+        if staff_lines[0] - spacing * 2 <= center_y <= staff_lines[0] - spacing * 0.15:
+            labels.append(ExactMeasureLabel(x=center_x, text=text))
+    return tuple(sorted(labels, key=lambda label: label.x))
+
+
+def _vector_rests(
+    words: list[tuple],
+    staff_lines: list[float],
+    crop_top: int,
+    crop_left: int,
+    crop_width: int,
+) -> tuple[ExactRestToken, ...]:
+    spacing = float(np.median(np.diff(staff_lines)))
+    rests: list[ExactRestToken] = []
+    for word in words:
+        x1, y1, x2, y2, raw_text = word[:5]
+        text = str(raw_text).strip()
+        duration = VECTOR_REST_DURATIONS.get(text)
+        if duration is None:
+            continue
+        center_x = (x1 + x2) * PDF_RENDER_SCALE / 2 - crop_left
+        center_y = (y1 + y2) * PDF_RENDER_SCALE / 2 - crop_top
+        if not 0 <= center_x < crop_width:
+            continue
+        if staff_lines[0] - spacing * 2 <= center_y <= staff_lines[-1] + spacing * 2:
+            rests.append(ExactRestToken(x=center_x, duration_units=duration))
+    return tuple(sorted(rests, key=lambda rest: rest.x))
+
+
 def render_and_segment_pdf(pdf_path: Path, output_dir: Path) -> PdfScoreImport:
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -169,8 +334,14 @@ def render_and_segment_pdf(pdf_path: Path, output_dir: Path) -> PdfScoreImport:
         systems: list[PdfScoreSystem] = []
         layout_counts: dict[str, int] = {}
         system_number = 0
+        tempo_candidates: list[float] = []
 
         for page_index, page in enumerate(document):
+            words = page.get_text("words")
+            for match in re.finditer(r"(?:BPM\s*[:=]?|[=＝])\s*(\d{2,3}(?:\.\d+)?)", page.get_text(), re.IGNORECASE):
+                value = float(match.group(1))
+                if 30 <= value <= 300:
+                    tempo_candidates.append(value)
             matrix = fitz.Matrix(PDF_RENDER_SCALE, PDF_RENDER_SCALE)
             width = round(page.rect.width * PDF_RENDER_SCALE)
             height = round(page.rect.height * PDF_RENDER_SCALE)
@@ -185,19 +356,47 @@ def render_and_segment_pdf(pdf_path: Path, output_dir: Path) -> PdfScoreImport:
             if color is None:
                 raise ValueError(f"第 {page_index + 1} 页无法转成图像")
             gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-            for page_system_index, (top, bottom) in enumerate(_system_crops(gray), start=1):
+            vector_crops = _vector_system_crops(page, gray.shape[0])
+            system_crops = vector_crops or [
+                (top, bottom, None) for top, bottom in _system_crops(gray)
+            ]
+            for page_system_index, (top, bottom, vector_staff_lines) in enumerate(system_crops, start=1):
                 crop = color[top:bottom]
                 if crop.size == 0:
                     continue
                 crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                 ink_columns = np.flatnonzero(np.count_nonzero(crop_gray < 245, axis=0) >= 2)
+                crop_left = 0
                 if ink_columns.size:
-                    left = max(0, int(ink_columns[0]) - 24)
+                    crop_left = max(0, int(ink_columns[0]) - 24)
                     right = min(crop.shape[1], int(ink_columns[-1]) + 25)
-                    crop = crop[:, left:right]
+                    crop = crop[:, crop_left:right]
                 try:
                     layout = detect_score_layout(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY))
                 except ValueError:
+                    continue
+                exact_tokens = _vector_tab_tokens(
+                    words,
+                    vector_staff_lines or layout.staff_lines,
+                    top,
+                    crop_left,
+                    crop.shape[1],
+                )
+                exact_measure_labels = _vector_measure_labels(
+                    words,
+                    vector_staff_lines or layout.staff_lines,
+                    top,
+                    crop_left,
+                    crop.shape[1],
+                )
+                exact_rests = _vector_rests(
+                    words,
+                    vector_staff_lines or layout.staff_lines,
+                    top,
+                    crop_left,
+                    crop.shape[1],
+                )
+                if vector_crops and not exact_tokens:
                     continue
                 system_number += 1
                 system_path = system_dir / f"system-{system_number:04d}.jpg"
@@ -209,9 +408,13 @@ def render_and_segment_pdf(pdf_path: Path, output_dir: Path) -> PdfScoreImport:
                         page_system_index,
                         layout.layout,
                         layout.polarity,
+                        exact_tokens,
+                        exact_measure_labels,
+                        exact_rests,
                     )
                 )
                 layout_counts[layout.layout] = layout_counts.get(layout.layout, 0) + 1
-        return PdfScoreImport(tuple(pages), tuple(systems), layout_counts)
+        tempo_bpm = tempo_candidates[0] if tempo_candidates else None
+        return PdfScoreImport(tuple(pages), tuple(systems), layout_counts, tempo_bpm)
     finally:
         document.close()

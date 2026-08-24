@@ -1,0 +1,25 @@
+_BASE_:
+  - ./tab_event_detector.yml
+
+epoch: 18
+snapshot_epoch: 1
+save_dir: ../../runs/pdf-fret-detector
+
+TrainDataset:
+  name: COCODataSet
+  image_dir: images/train
+  anno_path: annotations/train.json
+  dataset_dir: ../../data/pdf-frets
+  data_fields: [image, gt_bbox, gt_class, is_crowd]
+
+EvalDataset:
+  name: COCODataSet
+  image_dir: images/val
+  anno_path: annotations/val.json
+  dataset_dir: ../../data/pdf-frets
+  allow_empty: true
+
+TestDataset:
+  name: ImageFolder
+  anno_path: annotations/test.json
+  dataset_dir: ../../data/pdf-frets

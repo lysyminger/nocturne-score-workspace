@@ -23,11 +23,14 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@coderline/alphaskia": "3.5.147",
+    "@coderline/alphaskia-windows": "3.5.147",
     "@coderline/alphatab-vite": "1.8.4",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.1.0",
     "concurrently": "10.0.5",
+    "sharp": "0.35.3",
     "typescript": "5.9.3",
     "vite": "8.2.2"
   }

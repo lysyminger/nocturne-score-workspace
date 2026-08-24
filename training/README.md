@@ -48,7 +48,29 @@ RTX 4060 8GB 建议从 `BatchSize=2` 开始。脚本使用 PP-YOLOE+ CRN-S 并�
 
 ## PaddleOCR 数据
 
-PaddleOCR 的训练配置与标签格式以 `training/vendor/PaddleOCR/doc/doc_ch/` 中的官方文档为准。正式训练前先把六线谱数字裁成小图，并分别建立训练集和验证集，不要直接用测试视频参与训练集。
+先把私人 GP 文件渲染为图片和坐标真值，再生成品位数字 OCR 小图：
+
+```powershell
+node .\training\scripts\build_gp_corpus.mjs --source "D:\document\谱子" --profile tab
+.\training\.venv-paddle\Scripts\python.exe .\training\scripts\extract_fret_crops.py
+powershell -ExecutionPolicy Bypass -File .\training\train_fret_ocr.ps1 -Epochs 8 -BatchSize 256
+```
+
+续训、独立测试和导出网页/后端可加载的推理模型：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\training\train_fret_ocr.ps1 -Epochs 12 -BatchSize 256 -Resume
+powershell -ExecutionPolicy Bypass -File .\training\evaluate_fret_ocr.ps1 -Split test
+powershell -ExecutionPolicy Bypass -File .\training\export_fret_ocr.ps1
+```
+
+GP 的音符、品位、弦号、时值与技巧来自原始结构化数据；alphaTab 渲染坐标用于生成音符框。纯数字 OCR 会排除鬼音、延音目标、死音和泛音，避免裁图内容与标签不一致。PDF 没有这种真值，只渲染页面并自动切谱表：
+
+```powershell
+.\training\.venv-paddle\Scripts\python.exe .\training\scripts\build_pdf_corpus.py --source "D:\document\谱子"
+```
+
+PDF 切片属于弱标注，必须抽样复核后才能进入符号检测训练集。PaddleOCR 的原始训练说明仍以 `training/vendor/PaddleOCR/docs/` 中的官方文档为准。
 
 ## 数据边界
 

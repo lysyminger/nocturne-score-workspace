@@ -11,7 +11,7 @@ if (-not (Test-Path $PaddlePython)) {
 }
 & $PaddlePython -m pip install --upgrade pip
 & $PaddlePython -m pip install paddlepaddle-gpu==3.2.2 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-& $PaddlePython -m pip install paddleocr==3.7.0
+& $PaddlePython -m pip install paddleocr==3.7.0 PyMuPDF==1.28.2
 
 if (-not (Test-Path $PaddleSource)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PaddleSource) | Out-Null

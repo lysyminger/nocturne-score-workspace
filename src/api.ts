@@ -57,6 +57,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ rights_confirmed: rightsConfirmed })
     }),
+  lockProjectTempo: (id: string, tempoBpm: number) =>
+    request<Project>(`/api/projects/${id}/tempo`, {
+      method: "PATCH",
+      body: JSON.stringify({ tempo_bpm: tempoBpm })
+    }),
   inspectProject: (id: string) => request<Project>(`/api/projects/${id}/inspect`, { method: "POST" }),
   downloadProject: (id: string) =>
     request<{ status: string; message: string }>(`/api/projects/${id}/download`, { method: "POST" }),

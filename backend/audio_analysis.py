@@ -121,9 +121,27 @@ def _estimate_tempo(
     sample_rate: int,
     *,
     expected_tempo: float | None,
+    locked: bool = False,
 ) -> tuple[float, float, float]:
     frame_rate = sample_rate / HOP_SIZE
     centered = novelty - float(np.mean(novelty))
+    if locked and expected_tempo and expected_tempo > 0:
+        best_lag = 60 * frame_rate / expected_tempo
+        positions = np.arange(len(centered), dtype=np.float32)
+        start = math.ceil(best_lag)
+        energy = float(np.dot(centered, centered)) + 1e-8
+        shifted = np.interp(positions[start:] - best_lag, positions, centered)
+        raw_correlation = float(np.dot(centered[start:], shifted) / energy)
+        phase_scores = [
+            (
+                float(np.interp(np.arange(phase, len(novelty), best_lag), positions, novelty).sum()),
+                float(phase),
+            )
+            for phase in np.linspace(0, best_lag, max(16, round(best_lag * 8)), endpoint=False)
+        ]
+        _, phase = max(phase_scores, default=(0.0, 0.0))
+        confidence = min(0.96, max(0.0, raw_correlation * 2.2))
+        return float(expected_tempo), confidence, phase / frame_rate
     minimum_lag = max(1, round(frame_rate * 60 / 220))
     maximum_lag = min(len(centered) - 1, round(frame_rate * 60 / 55))
     if maximum_lag <= minimum_lag:
@@ -381,12 +399,15 @@ def analyze_samples(
     novelty = _novelty_envelope(flux)
     onsets = _detect_onsets(times, novelty, sample_rate)
     expected_tempo = None
+    tempo_locked = False
     if score_summary and score_summary.get("estimated_tempo_bpm"):
         expected_tempo = float(score_summary["estimated_tempo_bpm"])
+        tempo_locked = bool(score_summary.get("tempo_locked"))
     tempo, tempo_confidence, phase_seconds = _estimate_tempo(
         novelty,
         sample_rate,
         expected_tempo=expected_tempo,
+        locked=tempo_locked,
     )
     beats = _beat_grid(duration, tempo, phase_seconds, rms, sample_rate)
     sections = _detect_sections(times, rms, chroma, novelty, beats, duration)
@@ -404,12 +425,16 @@ def analyze_samples(
         "速度可能以半拍或双倍速度表示，请结合听感与拍号校对",
         "自动对齐是可编辑建议，不会覆盖已有的手动同步点",
     ]
+    if tempo_locked:
+        warnings[1] = f"项目速度已锁定为 {tempo:.1f} BPM；本次只检测拍点相位，不重新估算速度"
     return {
         "engine": "spectral_flux_chroma_v1",
         "source": source_kind,
         "duration_seconds": round(duration, 3),
         "tempo_bpm": round(float(tempo), 1),
         "tempo_confidence": round(float(tempo_confidence), 3),
+        "tempo_source": "user" if tempo_locked else "audio_analysis",
+        "tempo_locked": tempo_locked,
         "beat_count": len(beats),
         "onset_count": len(onsets),
         "beat_times": beats,

@@ -55,3 +55,21 @@ def test_video_highlight_alignment_takes_priority():
 
     assert len(result["alignment_suggestions"]) >= 2
     assert {item["basis"] for item in result["alignment_suggestions"]} == {"video_highlight"}
+
+
+def test_locked_project_tempo_is_not_overridden_by_audio():
+    result = analyze_samples(
+        click_track(bpm=120),
+        ANALYSIS_SAMPLE_RATE,
+        source_kind="uploaded_audio",
+        score_summary={
+            "start_measure": 1,
+            "end_measure": 8,
+            "estimated_tempo_bpm": 96,
+            "tempo_locked": True,
+        },
+    )
+
+    assert result["tempo_bpm"] == 96
+    assert result["tempo_source"] == "user"
+    assert result["tempo_locked"] is True

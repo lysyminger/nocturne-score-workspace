@@ -26,6 +26,7 @@ from backend.tab_recognition import (
     create_blank_tab_score,
     detect_measure_boundaries,
     detect_score_layout,
+    tempo_from_ocr_text,
     detect_staff_lines,
     update_recognized_measure,
 )
@@ -65,6 +66,15 @@ def test_measure_boundaries_keep_a_short_first_measure():
 )
 def test_maps_printed_technique_labels(text, technique):
     assert _technique_from_text(text) == technique
+
+
+@pytest.mark.parametrize("text, expected", [("BPM 180", 180), ("Tempo: 96.5", 96.5), ("Q = 144", 144)])
+def test_reads_only_explicit_visual_tempo_markings(text, expected):
+    assert tempo_from_ocr_text(text) == expected
+
+
+def test_does_not_mistake_measure_or_fret_numbers_for_tempo():
+    assert tempo_from_ocr_text("32 7 9 12") is None
 
 
 def test_technique_mark_is_attached_to_the_preceding_note_group():

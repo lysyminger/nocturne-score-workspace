@@ -105,6 +105,7 @@ class ParsedFrame:
     polarity: str = "dark_on_light"
     notation_staff_lines: list[int] | None = None
     technique_marks: list[TechniqueMark] = field(default_factory=list)
+    tempo_candidates: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -821,6 +822,54 @@ def _technique_from_text(text: str) -> str | None:
     return None
 
 
+def tempo_from_ocr_text(text: str) -> float | None:
+    """Read an explicit tempo marking without mistaking measure or fret numbers for BPM."""
+    normalized = text.upper().replace(",", ".")
+    patterns = (
+        r"(?:B\s*P\s*M|TEMPO)\s*[:=]?\s*(\d{2,3}(?:\.\d+)?)",
+        r"(\d{2,3}(?:\.\d+)?)\s*(?:B\s*P\s*M)",
+        r"(?:[♩♪]|\b(?:Q|J)\b)\s*=\s*(\d{2,3}(?:\.\d+)?)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        value = float(match.group(1))
+        if 30 <= value <= 300:
+            return value
+    return None
+
+
+def detect_tempo_from_images(
+    image_paths: list[Path],
+    *,
+    tesseract_path: str = "tesseract",
+    sample_limit: int = 8,
+) -> float | None:
+    """Quickly scan early score/video crops for an explicit BPM marking."""
+    if not image_paths:
+        return None
+    sampled = image_paths[:sample_limit]
+    candidates: list[float] = []
+    for image_path in sampled:
+        try:
+            result = subprocess.run(
+                [tesseract_path, str(image_path), "stdout", "--psm", "11", "-l", "eng"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode != 0:
+            continue
+        value = tempo_from_ocr_text(result.stdout)
+        if value is not None:
+            candidates.append(value)
+    return round(float(statistics.median(candidates)), 1) if candidates else None
+
+
 def _run_technique_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> None:
     work_dir.mkdir(parents=True, exist_ok=True)
     image_path = work_dir / f"technique-{frame.source.source_frame or frame.source.path.stem}.png"
@@ -851,9 +900,17 @@ def _run_technique_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) 
 
     spacing = float(statistics.median(np.diff(frame.staff_lines)))
     marks: list[TechniqueMark] = []
-    reader = csv.DictReader(io.StringIO(result.stdout), delimiter="\t")
-    for row in reader:
+    rows = list(csv.DictReader(io.StringIO(result.stdout), delimiter="\t"))
+    tempo_lines: dict[tuple[str, str, str, str], list[tuple[float, str]]] = defaultdict(list)
+    for row in rows:
         raw_text = (row.get("text") or "").strip()
+        if raw_text:
+            try:
+                word_confidence = max(0.0, float(row.get("conf") or 0))
+            except (TypeError, ValueError):
+                word_confidence = 0.0
+            line_key = tuple(str(row.get(name) or "") for name in ("page_num", "block_num", "par_num", "line_num"))
+            tempo_lines[line_key].append((word_confidence, raw_text))
         technique = _technique_from_text(raw_text)
         if not technique:
             continue
@@ -877,6 +934,12 @@ def _run_technique_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) 
             )
         )
     frame.technique_marks = marks
+    candidates: list[tuple[float, float]] = []
+    for words in tempo_lines.values():
+        value = tempo_from_ocr_text(" ".join(word for _confidence, word in words))
+        if value is not None:
+            candidates.append((value, statistics.mean(confidence for confidence, _word in words)))
+    frame.tempo_candidates = candidates
 
 
 @dataclass
@@ -1559,6 +1622,7 @@ def recognize_tab_frames(
     *,
     title: str,
     tesseract_path: str = "tesseract",
+    tempo_bpm: float | None = None,
 ) -> TabRecognitionResult:
     if not frames:
         raise ValueError("没有视频切片可供 TAB 识别")
@@ -1586,7 +1650,20 @@ def recognize_tab_frames(
     usable = measures
 
     suggestions, estimated_tempo = _sync_suggestions(parsed)
-    tempo = estimated_tempo or 120.0
+    visual_tempos = [value for frame in parsed for value, confidence in frame.tempo_candidates if confidence >= 20]
+    detected_visual_tempo = statistics.median(visual_tempos) if visual_tempos else None
+    if tempo_bpm is not None:
+        tempo = min(300.0, max(30.0, float(tempo_bpm)))
+        tempo_source = "user"
+    elif detected_visual_tempo is not None:
+        tempo = detected_visual_tempo
+        tempo_source = "visual_ocr"
+    elif estimated_tempo is not None:
+        tempo = estimated_tempo
+        tempo_source = "video_timing"
+    else:
+        tempo = 120.0
+        tempo_source = "default"
     score_path = output_dir / "recognized-tab.musicxml"
     _build_musicxml(title, usable, score_path, tempo)
     recognized_pdf_path: Path | None = None
@@ -1634,6 +1711,8 @@ def recognize_tab_frames(
         warnings.append("已检测到上五线谱、下六线谱的联合谱；小节号与 PDF 裁切会保留上方五线谱")
     if polarity_counts.get("light_on_dark"):
         warnings.append("已对深色或半透明背景上的浅色谱线做自动反相与背景抑制")
+    if tempo_source == "visual_ocr":
+        warnings.append(f"已从谱面或视频文字识别到 {tempo:.1f} BPM；手动锁定后自动分析不会再覆盖")
     if pdf_error:
         warnings.append(f"按小节合成 PDF 失败，仍保留切片预览 PDF：{pdf_error}")
     if gaps:
@@ -1652,6 +1731,8 @@ def recognize_tab_frames(
         "start_measure": start_measure,
         "end_measure": end_measure,
         "estimated_tempo_bpm": round(tempo, 1),
+        "tempo_source": tempo_source,
+        "tempo_locked": tempo_bpm is not None,
         "time_signature_numerator": 4,
         "time_signature_denominator": 4,
         "confidence": round(confidence, 3),

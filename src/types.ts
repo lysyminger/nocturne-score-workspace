@@ -23,6 +23,8 @@ export type RecognitionSummary = {
   start_measure?: number;
   end_measure?: number;
   estimated_tempo_bpm?: number;
+  tempo_source?: "user" | "score" | "visual_ocr" | "video_timing" | "audio_analysis" | "default";
+  tempo_locked?: boolean;
   time_signature_numerator?: number;
   time_signature_denominator?: number;
   invalid_measures?: number[];
@@ -71,6 +73,8 @@ export type AudioAnalysis = {
   duration_seconds?: number;
   tempo_bpm?: number;
   tempo_confidence?: number;
+  tempo_source?: "user" | "audio_analysis";
+  tempo_locked?: boolean;
   beat_count?: number;
   onset_count?: number;
   beat_times?: number[];
@@ -217,6 +221,9 @@ export type Project = {
   video_analysis: VideoAnalysis | null;
   recognition_summary: RecognitionSummary | null;
   audio_analysis: AudioAnalysis | null;
+  tempo_bpm: number | null;
+  tempo_source: "user" | "score" | "visual_ocr" | "video_timing" | "audio_analysis" | "default" | null;
+  tempo_locked: boolean;
   cover_url: string | null;
   pdf_url: string | null;
   audio_url: string | null;

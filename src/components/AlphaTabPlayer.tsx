@@ -34,6 +34,7 @@ type RecognitionChange = { measure: number; events: RecognitionEvent[] };
 type Props = {
   scoreUrl: string;
   masterVolume: number;
+  lockedTempoBpm: number | null;
   fileBaseName: string;
   pdfUrl: string | null;
   videoUrl: string | null;
@@ -640,6 +641,7 @@ function isTypingTarget(target: EventTarget | null) {
 export function AlphaTabPlayer({
   scoreUrl,
   masterVolume,
+  lockedTempoBpm,
   fileBaseName,
   pdfUrl,
   videoUrl,
@@ -1335,6 +1337,13 @@ export function AlphaTabPlayer({
     });
     api.scoreLoaded.on((score) => {
       try {
+        if (lockedTempoBpm !== null && Number.isFinite(lockedTempoBpm) && score.masterBars.length) {
+          for (const masterBar of score.masterBars) masterBar.tempoAutomations = [];
+          score.masterBars[0].tempoAutomations.push(
+            alphaTab.model.Automation.buildTempoAutomation(false, 0, lockedTempoBpm, 2, true)
+          );
+          score.finish(api.settings);
+        }
         scoreRef.current = score;
         const anchors = buildVideoSyncAnchors(score, syncPointsRef.current, recognitionRef.current);
         videoSyncAnchorsRef.current = anchors;
@@ -1410,7 +1419,7 @@ export function AlphaTabPlayer({
       api.destroy();
       apiRef.current = null;
     };
-  }, [scoreUrl, scrollElement]);
+  }, [scoreUrl, scrollElement, lockedTempoBpm]);
 
   useEffect(() => {
     localStorage.setItem("nocturne-bars-per-row", String(barsPerRow));

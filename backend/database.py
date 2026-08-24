@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS projects (
     video_analysis TEXT,
     recognition_summary TEXT,
     audio_analysis TEXT,
+    tempo_bpm REAL,
+    tempo_source TEXT,
+    tempo_locked INTEGER NOT NULL DEFAULT 0,
     score_pdf_path TEXT,
     score_file_path TEXT,
     score_file_name TEXT,
@@ -104,6 +107,12 @@ class Database:
                 connection.execute("ALTER TABLE projects ADD COLUMN recognition_summary TEXT")
             if "audio_analysis" not in project_columns:
                 connection.execute("ALTER TABLE projects ADD COLUMN audio_analysis TEXT")
+            if "tempo_bpm" not in project_columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN tempo_bpm REAL")
+            if "tempo_source" not in project_columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN tempo_source TEXT")
+            if "tempo_locked" not in project_columns:
+                connection.execute("ALTER TABLE projects ADD COLUMN tempo_locked INTEGER NOT NULL DEFAULT 0")
 
             asset_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(assets)").fetchall()

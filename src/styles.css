@@ -735,6 +735,17 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .score-selection-layer .score-cell-cursor > .rest-preview { position: absolute; z-index: 2; left: 50%; top: 50%; display: grid; place-items: center; color: rgba(86,86,94,.58); transform: translate(-50%, -50%); }
 .score-selection-layer .rest-preview > span { min-width: 1.15rem; min-height: 1.15rem; text-align: center; font: 500 1.2rem/1 "Bravura", "Segoe UI Symbol", serif; filter: drop-shadow(0 1px 0 rgba(255,255,255,.72)); }
 .score-selection-layer .rest-preview > small { display: none; }
+
+.tempo-lock-panel { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: .55rem; padding: .68rem; border: 1px solid rgba(121,112,205,.18); border-radius: .82rem; background: rgba(118,105,231,.055); }
+.tempo-lock-panel > div { min-width: 0; display: grid; gap: .12rem; }
+.tempo-lock-panel > div strong { font-size: .8rem; color: var(--text-strong); }
+.tempo-lock-panel > div small { overflow: hidden; color: var(--text-muted); font-size: .67rem; text-overflow: ellipsis; white-space: nowrap; }
+.tempo-lock-panel label { display: flex; align-items: center; gap: .3rem; padding: .26rem .42rem; border-radius: .52rem; background: var(--surface-solid); box-shadow: inset 0 0 0 1px rgba(93,87,145,.14); }
+.tempo-lock-panel input { width: 4.5rem; border: 0; outline: 0; background: transparent; color: var(--text-strong); font: 650 .82rem/1.2 inherit; text-align: right; }
+.tempo-lock-panel label span { color: var(--text-muted); font-size: .65rem; }
+.tempo-lock-panel button { display: inline-flex; align-items: center; gap: .28rem; min-height: 2rem; padding: 0 .62rem; border: 1px solid rgba(112,99,218,.22); border-radius: .58rem; background: rgba(118,105,231,.08); color: #655bc9; font-size: .72rem; font-weight: 650; }
+.tempo-lock-panel.locked { border-color: rgba(112,99,218,.34); background: rgba(118,105,231,.1); }
+.tempo-lock-panel button.active { background: #7063da; color: white; }
 .score-selection-layer .measure-error-marker {
   border: 1.5px solid rgba(229,82,91,.82);
   border-radius: .42rem;

@@ -506,6 +506,7 @@ function ProjectWorkspace({
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<string | null>(null);
   const [title, setTitle] = useState("");
+  const [tempoDraft, setTempoDraft] = useState("120");
   const [measure, setMeasure] = useState(1);
   const [currentTime, setCurrentTime] = useState(0);
   const [follow, setFollow] = useState(false);
@@ -588,6 +589,11 @@ function ProjectWorkspace({
   }, [project?.audio_url]);
 
   useEffect(() => {
+    const value = project?.tempo_bpm ?? project?.recognition_summary?.estimated_tempo_bpm;
+    if (typeof value === "number") setTempoDraft(String(value));
+  }, [project?.id, project?.tempo_bpm, project?.tempo_locked, project?.recognition_summary?.estimated_tempo_bpm]);
+
+  useEffect(() => {
     if (!scoreDirty) return;
     const handler = (event: BeforeUnloadEvent) => {
       event.preventDefault();
@@ -638,6 +644,29 @@ function ProjectWorkspace({
     const trimmed = title.trim();
     if (!project || !trimmed || trimmed === project.title) return;
     await run("rename", () => api.renameProject(project.id, trimmed), "名称已保存");
+  }
+
+  async function lockTempo() {
+    if (!project) return;
+    const tempo = Number(tempoDraft);
+    if (!Number.isFinite(tempo) || tempo < 30 || tempo > 300) {
+      showNotice({ message: "BPM 必须在 30～300 之间", tone: "error" });
+      return;
+    }
+    setAction("tempo");
+    try {
+      const updated = await api.lockProjectTempo(project.id, tempo);
+      setProject(updated);
+      setTempoDraft(String(updated.tempo_bpm ?? tempo));
+      setScoreRevision(updated.updated_at);
+      setRecognition(null);
+      setRecognitionRetry((value) => value + 1);
+      showNotice({ message: `已锁定 ${Number(updated.tempo_bpm ?? tempo).toFixed(1)} BPM，后续自动分析不会覆盖`, tone: "success" });
+    } catch (error) {
+      showNotice({ message: error instanceof Error ? error.message : "锁定 BPM 失败", tone: "error" });
+    } finally {
+      setAction(null);
+    }
   }
 
   async function openReviewAt(timeSeconds?: number) {
@@ -846,6 +875,14 @@ function ProjectWorkspace({
   );
   const hasPdfTab = isPdfProject && pdfTabSystems > 0;
   const recognizedTechniqueCount = Object.values(project.recognition_summary?.technique_counts ?? {}).reduce((total, count) => total + count, 0);
+  const tempoSourceLabel = {
+    user: "用户锁定",
+    score: "谱面速度标记",
+    visual_ocr: "谱面/视频文字识别",
+    video_timing: "视频小节变化估算",
+    audio_analysis: "音频节拍分析",
+    default: "默认候选"
+  }[project.tempo_source ?? "default"];
   const canStartRecognition = project.video_frames.length
     ? capabilities.tab_ocr
     : hasPdfTab
@@ -962,6 +999,7 @@ function ProjectWorkspace({
                     <AlphaTabPlayer
                     scoreUrl={`${project.score_file_url}?v=${encodeURIComponent(scoreRevision || project.score_file_url)}`}
                     masterVolume={scoreVolume}
+                    lockedTempoBpm={project.tempo_locked ? project.tempo_bpm : null}
                     fileBaseName={project.title}
                     pdfUrl={project.pdf_url}
                     videoUrl={project.video_url}
@@ -1052,6 +1090,11 @@ function ProjectWorkspace({
 
           <section className="inspector-section">
             <div className="inspector-heading"><span><WandSparkles size={16} /></span><div><h3>{isManualTab ? "乐谱结构" : "乐谱识别"}</h3><p>{isManualTab ? "可保存的六线谱事件模型" : project.video_frames.length || hasPdfTab ? (capabilities.tab_ocr ? "六线 TAB 专用引擎已就绪" : "TAB OCR 引擎尚未安装") : (capabilities.audiveris ? "Audiveris 已就绪" : "五线谱引擎尚未安装")}</p></div></div>
+            <div className={`tempo-lock-panel ${project.tempo_locked ? "locked" : ""}`}>
+              <div><strong>项目 BPM</strong><small>{project.tempo_locked ? "已锁定，所有后续流程强制使用" : `${tempoSourceLabel}，可手动确认锁定`}</small></div>
+              <label><input type="number" min="30" max="300" step="0.1" value={tempoDraft} onChange={(event) => setTempoDraft(event.target.value)} aria-label="项目 BPM" /><span>BPM</span></label>
+              <button type="button" className={project.tempo_locked ? "active" : ""} disabled={action === "tempo"} onClick={() => void lockTempo()}>{action === "tempo" ? <LoaderCircle size={14} className="spin" /> : <LockKeyhole size={14} />} {project.tempo_locked ? "更新锁定" : "锁定"}</button>
+            </div>
             <p className="inspector-copy">{isManualTab ? "同一时间格的六根弦可以组成和弦；删除只影响当前弦。音符、时值和技巧保存后会重建可播放的 MusicXML。" : project.video_frames.length ? "从原始切片识别弦号、品位和节奏网格，按小节号去重；校对器可继续修正时值与技巧。" : hasPdfTab ? `PDF 已自动拆成 ${project.recognition_summary?.system_count ?? pdfTabSystems} 行谱；六线谱负责弦与品位，检测到上五线谱时会保留为节奏和小节对照。` : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
             {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.page_count ? ` · ${project.recognition_summary.page_count} 页` : ""}{project.recognition_summary.system_count ? ` · ${project.recognition_summary.system_count} 行谱` : ""}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{recognizedTechniqueCount ? ` · ${recognizedTechniqueCount} 个技巧标记` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 覆盖置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}{typeof project.recognition_summary.glyph_coverage === "number" ? ` · 数字覆盖 ${Math.round(project.recognition_summary.glyph_coverage * 100)}%` : ""}</p>}
             {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || action === "recognize" || project.status === "recognizing" || !canStartRecognition} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>

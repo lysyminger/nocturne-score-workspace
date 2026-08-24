@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import zipfile
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +32,7 @@ from backend.tab_recognition import FrameInput as TabFrameInput
 from backend.tab_recognition import (
     append_blank_tab_measure,
     create_blank_tab_score,
+    detect_tempo_from_images,
     recognize_tab_frames,
     recognize_tab_measure,
     update_recognized_measure,
@@ -53,6 +56,34 @@ MAX_SCORE_BYTES = 40 * 1024 * 1024
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 SCORE_EXTENSIONS = {".gp", ".gp3", ".gp4", ".gp5", ".gpx", ".musicxml", ".xml", ".mxl"}
+
+
+def score_tempo_candidate(path: Path) -> float | None:
+    try:
+        if path.suffix.lower() == ".mxl":
+            with zipfile.ZipFile(path) as archive:
+                names = [name for name in archive.namelist() if name.lower().endswith((".xml", ".musicxml")) and not name.startswith("META-INF/")]
+                if not names:
+                    return None
+                root = ET.fromstring(archive.read(names[0]))
+        elif path.suffix.lower() in {".xml", ".musicxml"}:
+            root = ET.parse(path).getroot()
+        else:
+            return None
+    except (OSError, ET.ParseError, zipfile.BadZipFile, KeyError):
+        return None
+    for element in root.iter():
+        name = element.tag.rsplit("}", 1)[-1]
+        raw_value = element.attrib.get("tempo") if name == "sound" else element.text if name == "per-minute" else None
+        if raw_value is None:
+            continue
+        try:
+            value = float(raw_value.strip())
+        except (AttributeError, ValueError):
+            continue
+        if 30 <= value <= 300:
+            return round(value, 1)
+    return None
 
 
 def utc_now() -> datetime:
@@ -92,6 +123,10 @@ class ProjectUpdateRequest(BaseModel):
 
 class ProjectRightsRequest(BaseModel):
     rights_confirmed: bool
+
+
+class ProjectTempoRequest(BaseModel):
+    tempo_bpm: float = Field(ge=30, le=300)
 
 
 class VideoSliceRequest(BaseModel):
@@ -264,6 +299,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def project_payload(row) -> dict:
         project = dict(row)
         project["rights_confirmed"] = bool(project["rights_confirmed"])
+        project["tempo_locked"] = bool(project.get("tempo_locked"))
         source_metadata = json_object(project["source_metadata"])
         cover_path = source_metadata.pop("_cover_path", None) if source_metadata else None
         project["source_metadata"] = source_metadata
@@ -478,15 +514,17 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 INSERT INTO projects(
                     id, user_id, title, source_input, source_kind, source_id, source_url,
                     rights_confirmed, status, status_message, recognition_summary,
+                    tempo_bpm, tempo_source, tempo_locked,
                     score_file_path, score_file_name, created_at, updated_at
                 ) VALUES (?, ?, ?, 'manual://tab', 'manual_tab', '手动六线谱', '',
-                    1, 'score_ready', '空白六线谱已创建，可以逐弦打谱', ?, ?, ?, ?, ?)
+                    1, 'score_ready', '空白六线谱已创建，可以逐弦打谱', ?, ?, 'default', 0, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
                     user["id"],
                     title,
                     json.dumps(result.summary, ensure_ascii=False),
+                    body.tempo_bpm,
                     str(result.score_path),
                     result.score_path.name,
                     now,
@@ -526,6 +564,64 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 updated_at = ? WHERE id = ?
                 """,
                 (int(body.rights_confirmed), int(body.rights_confirmed), utc_text(), project_id),
+            )
+            row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        return project_payload(row)
+
+    @api.patch("/api/projects/{project_id}/tempo")
+    def lock_project_tempo(
+        project_id: str, body: ProjectTempoRequest, user: dict = Depends(current_user)
+    ) -> dict:
+        project = owned_project(project_id, user["id"])
+        tempo = round(float(body.tempo_bpm), 1)
+        summary = json_object(project["recognition_summary"])
+        if summary is not None:
+            summary["estimated_tempo_bpm"] = tempo
+            summary["tempo_source"] = "user"
+            summary["tempo_locked"] = True
+
+        score_path = resolve_project_file(project_id, project["score_file_path"])
+        if score_path and score_path.suffix.lower() in {".xml", ".musicxml"}:
+            try:
+                source = score_path.read_text(encoding="utf-8")
+                source = re.sub(r"(<per-minute>)[^<]+", rf"\g<1>{tempo:g}", source)
+                source = re.sub(r'(<sound\b[^>]*\btempo=")[^"]+', rf"\g<1>{tempo:g}", source)
+                temporary = score_path.with_name(f".{score_path.name}.tempo.tmp")
+                temporary.write_text(source, encoding="utf-8")
+                temporary.replace(score_path)
+            except OSError as exc:
+                raise HTTPException(status_code=422, detail=f"写入乐谱 BPM 失败：{str(exc)[:180]}") from exc
+
+        if score_path:
+            diagnostics_path = score_path.parent / "recognition.json"
+            if diagnostics_path.is_file():
+                try:
+                    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+                    diagnostics_summary = diagnostics.setdefault("summary", {})
+                    diagnostics_summary["estimated_tempo_bpm"] = tempo
+                    diagnostics_summary["tempo_source"] = "user"
+                    diagnostics_summary["tempo_locked"] = True
+                    diagnostics_path.write_text(
+                        json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise HTTPException(status_code=422, detail=f"保存 BPM 诊断数据失败：{str(exc)[:180]}") from exc
+
+        now = utc_text()
+        with db.connect() as connection:
+            connection.execute(
+                """
+                UPDATE projects SET tempo_bpm = ?, tempo_source = 'user', tempo_locked = 1,
+                recognition_summary = ?, audio_analysis = NULL,
+                status_message = ?, updated_at = ? WHERE id = ?
+                """,
+                (
+                    tempo,
+                    json.dumps(summary, ensure_ascii=False) if summary is not None else None,
+                    f"项目速度已锁定为 {tempo:g} BPM；后续识别、分析与播放均使用此值",
+                    now,
+                    project_id,
+                ),
             )
             row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return project_payload(row)
@@ -653,6 +749,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 )
             except (OSError, ValueError) as exc:
                 preview_pdf_error = str(exc)[:240]
+            capabilities = capability_status()
+            detected_tempo = (
+                detect_tempo_from_images(
+                    [frame.path for frame in frames],
+                    tesseract_path=capabilities["tesseract_path"],
+                )
+                if capabilities["tab_ocr"]
+                else None
+            )
             now = utc_text()
             completed = {
                 **config,
@@ -663,6 +768,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 "frame_count": len(frames),
                 "preview_pdf_status": "complete" if preview_pdf_path else "failed",
                 "preview_pdf_error": preview_pdf_error,
+                "detected_tempo_bpm": detected_tempo,
                 "completed_at": now,
             }
             asset_rows = [
@@ -715,13 +821,19 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     message += f"；PDF 生成失败：{preview_pdf_error}"
                 connection.execute(
                     """
-                    UPDATE projects SET video_analysis = ?, score_pdf_path = ?, status = ?, status_message = ?, updated_at = ?
+                    UPDATE projects SET video_analysis = ?, score_pdf_path = ?, status = ?,
+                    tempo_bpm = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_bpm ELSE ? END,
+                    tempo_source = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_source ELSE 'visual_ocr' END,
+                    status_message = ?, updated_at = ?
                     WHERE id = ?
                     """,
                     (
                         json.dumps(completed, ensure_ascii=False),
                         pdf_path,
                         next_status,
+                        detected_tempo,
+                        detected_tempo,
+                        detected_tempo,
                         message,
                         now,
                         project_id,
@@ -1112,10 +1224,23 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             with db.connect() as connection:
                 connection.execute(
                     """
-                    UPDATE projects SET audio_analysis = ?, status_message = ?, updated_at = ?
+                    UPDATE projects SET audio_analysis = ?,
+                    tempo_bpm = CASE
+                        WHEN tempo_locked = 0 AND COALESCE(tempo_source, 'default') IN ('default', 'video_timing', 'audio_analysis') THEN ?
+                        ELSE tempo_bpm END,
+                    tempo_source = CASE
+                        WHEN tempo_locked = 0 AND COALESCE(tempo_source, 'default') IN ('default', 'video_timing', 'audio_analysis') THEN 'audio_analysis'
+                        ELSE tempo_source END,
+                    status_message = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (json.dumps(analysis, ensure_ascii=False), message, utc_text(), project_id),
+                    (
+                        json.dumps(analysis, ensure_ascii=False),
+                        float(analysis["tempo_bpm"]),
+                        message,
+                        utc_text(),
+                        project_id,
+                    ),
                 )
         except Exception as exc:
             failed = {
@@ -1169,6 +1294,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=detail)
 
         score_summary = json_object(project["recognition_summary"])
+        if project["tempo_locked"] and project["tempo_bpm"] is not None:
+            score_summary = {
+                **(score_summary or {}),
+                "estimated_tempo_bpm": float(project["tempo_bpm"]),
+                "tempo_source": "user",
+                "tempo_locked": True,
+            }
         visual_sync: list[dict] = []
         if source_kind == "video_audio" and project["score_file_path"]:
             diagnostics_path = Path(project["score_file_path"]).parent / "recognition.json"
@@ -1274,14 +1406,26 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{uuid.uuid4().hex}{suffix}"
         target.write_bytes(content)
+        detected_tempo = score_tempo_candidate(target)
         with db.connect() as connection:
             connection.execute(
                 """
                 UPDATE projects SET score_file_path = ?, score_file_name = ?, status = 'score_ready',
-                recognition_summary = NULL, status_message = '结构化乐谱已准备，可在线试听',
+                recognition_summary = NULL,
+                tempo_bpm = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_bpm ELSE ? END,
+                tempo_source = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_source ELSE 'score' END,
+                status_message = '结构化乐谱已准备，可在线试听',
                 updated_at = ? WHERE id = ?
                 """,
-                (str(target), file.filename or target.name, utc_text(), project_id),
+                (
+                    str(target),
+                    file.filename or target.name,
+                    detected_tempo,
+                    detected_tempo,
+                    detected_tempo,
+                    utc_text(),
+                    project_id,
+                ),
             )
             row = connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return project_payload(row)
@@ -1302,11 +1446,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             if not score_files:
                 raise RuntimeError("Audiveris 没有生成 MusicXML 文件")
             score_path = max(score_files, key=lambda path: path.stat().st_mtime)
+            detected_tempo = score_tempo_candidate(score_path)
             with db.connect() as connection:
                 connection.execute(
                     """
                     UPDATE projects SET score_file_path = ?, score_file_name = ?, status = 'score_ready',
-                    recognition_summary = ?, status_message = '五线谱识别完成，请逐小节校对',
+                    recognition_summary = ?,
+                    tempo_bpm = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_bpm ELSE ? END,
+                    tempo_source = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_source ELSE 'score' END,
+                    status_message = '五线谱识别完成，请逐小节校对',
                     updated_at = ? WHERE id = ?
                     """,
                     (
@@ -1320,6 +1468,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             },
                             ensure_ascii=False,
                         ),
+                        detected_tempo,
+                        detected_tempo,
+                        detected_tempo,
                         utc_text(),
                         project_id,
                     ),
@@ -1340,11 +1491,21 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         replace_pdf: bool = True,
     ) -> None:
         try:
+            with db.connect() as connection:
+                tempo_row = connection.execute(
+                    "SELECT tempo_bpm, tempo_locked FROM projects WHERE id = ?", (project_id,)
+                ).fetchone()
+            locked_tempo = (
+                float(tempo_row["tempo_bpm"])
+                if tempo_row and tempo_row["tempo_locked"] and tempo_row["tempo_bpm"] is not None
+                else None
+            )
             result = recognize_tab_frames(
                 frames,
                 output_dir,
                 title=title,
                 tesseract_path=tesseract_path,
+                tempo_bpm=locked_tempo,
             )
             summary = result.summary
             with db.connect() as connection:
@@ -1357,6 +1518,9 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 summary["system_count"] = existing_summary.get("system_count")
                 summary["source_kind"] = "pdf"
                 summary["engine_label"] = "PDF 六线 TAB 专用识别（Beta）"
+            recognized_tempo = summary.get("estimated_tempo_bpm")
+            recognized_tempo = float(recognized_tempo) if recognized_tempo is not None else None
+            recognized_tempo_source = str(summary.get("tempo_source") or "recognition")
             message = (
                 f"已识别 {summary['measure_count']} 小节六线 TAB；"
                 "已按小节号去重并合成完整 PDF，请在保存前逐小节试听校对"
@@ -1366,6 +1530,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     """
                     UPDATE projects SET score_file_path = ?, score_file_name = ?, status = 'score_ready',
                     score_pdf_path = COALESCE(?, score_pdf_path), recognition_summary = ?,
+                    tempo_bpm = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_bpm ELSE ? END,
+                    tempo_source = CASE WHEN tempo_locked = 1 OR ? IS NULL THEN tempo_source ELSE ? END,
                     status_message = ?, updated_at = ? WHERE id = ?
                     """,
                     (
@@ -1373,6 +1539,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         result.score_path.name,
                         str(result.pdf_path) if replace_pdf and result.pdf_path else None,
                         json.dumps(summary, ensure_ascii=False),
+                        recognized_tempo,
+                        recognized_tempo,
+                        recognized_tempo,
+                        recognized_tempo_source,
                         message,
                         utc_text(),
                         project_id,

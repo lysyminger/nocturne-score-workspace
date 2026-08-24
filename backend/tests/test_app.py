@@ -191,6 +191,32 @@ def test_manual_tab_can_insert_measure_and_shift_later_sync_points(client: TestC
     assert persisted["sync_points"][0]["measure_number"] == 4
 
 
+def test_project_tempo_lock_survives_score_rebuild(client: TestClient):
+    register(client)
+    project = client.post(
+        "/api/projects/manual-tab",
+        json={"title": "锁定速度测试", "measure_count": 1, "tempo_bpm": 100},
+    ).json()
+
+    locked = client.patch(
+        f"/api/projects/{project['id']}/tempo",
+        json={"tempo_bpm": 156},
+    )
+
+    assert locked.status_code == 200
+    assert locked.json()["tempo_bpm"] == 156
+    assert locked.json()["tempo_source"] == "user"
+    assert locked.json()["tempo_locked"] is True
+    rebuilt = client.patch(
+        f"/api/projects/{project['id']}/recognition/measures/1",
+        json={"events": [{"onset_eighths": 0, "duration_eighths": 8, "rest": True}]},
+    )
+    assert rebuilt.status_code == 200
+    assert rebuilt.json()["summary"]["estimated_tempo_bpm"] == 156
+    score_xml = client.get(f"/api/projects/{project['id']}/files/score").text
+    assert 'tempo="156.0"' in score_xml
+
+
 def test_inspect_caches_private_cover_for_library(client: TestClient, monkeypatch):
     register(client)
     project = client.post(

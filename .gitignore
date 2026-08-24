@@ -9,6 +9,12 @@ data/
 .env
 .deploy/
 .diagnostics/
+training/.venv-*/
+training/.cache-*/
+training/vendor/
+training/data/
+training/runs/
+training/models/
 public/font/
 public/soundfont/
 public/audio/*.js

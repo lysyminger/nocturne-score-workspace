@@ -1,0 +1,27 @@
+classes:
+  - note_head_filled
+  - note_head_open
+  - stem
+  - beam_single
+  - beam_double
+  - flag_eighth
+  - flag_sixteenth
+  - rest_whole
+  - rest_half
+  - rest_quarter
+  - rest_eighth
+  - rest_sixteenth
+  - augmentation_dot
+  - double_dot
+  - tie
+  - slide_up
+  - slide_down
+  - hammer_on
+  - pull_off
+  - bend
+  - vibrato
+  - natural_harmonic
+  - artificial_harmonic
+  - palm_mute
+  - let_ring
+  - dead_note

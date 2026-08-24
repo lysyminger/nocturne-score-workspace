@@ -406,9 +406,10 @@ def main() -> None:
         )
     cluster_rows.sort(
         key=lambda row: (
+            -row["member_count"],
+            row["source_id"],
             row["project_id"],
             row["analysis_id"],
-            -row["member_count"],
             row["id"],
         )
     )
@@ -447,6 +448,11 @@ def main() -> None:
         "candidates": len(rows),
         "clusters_to_review": len(cluster_rows),
         "cluster_reduction_ratio": round(1 - len(cluster_rows) / len(rows), 6) if rows else 0.0,
+        "top_100_cluster_coverage": round(
+            sum(row["member_count"] for row in cluster_rows[:100]) / len(rows), 6
+        )
+        if rows
+        else 0.0,
         "high_confidence_predictions": sum(
             bool(row["prediction"]) and row["confidence"] >= 0.985 for row in rows
         ),

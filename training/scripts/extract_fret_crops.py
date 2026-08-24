@@ -44,6 +44,22 @@ def iter_notes(label_data: dict):
                         yield master_bar["master_bar_index"], beat, note
 
 
+def referenced_label_files(corpus: Path) -> list[Path]:
+    manifest_path = corpus / "manifest.jsonl"
+    if not manifest_path.is_file():
+        return sorted(corpus.glob("*/*.labels.json"))
+    label_files: list[Path] = []
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        if entry.get("status") != "ok":
+            continue
+        for render in entry.get("renders", []):
+            label_files.append(corpus / Path(render["labels"]))
+    return label_files
+
+
 def is_plain_fret(note: dict) -> bool:
     return (
         note.get("is_stringed")
@@ -75,7 +91,7 @@ def main() -> None:
     source_counts: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
     crop_counts: dict[str, int] = {"train": 0, "val": 0, "test": 0}
 
-    label_files = sorted(args.corpus.glob("*/*.labels.json"))
+    label_files = referenced_label_files(args.corpus)
     for label_path in label_files:
         data = json.loads(label_path.read_text(encoding="utf-8"))
         if data.get("profile") != "tab":

@@ -720,7 +720,8 @@ function ProjectWorkspace({
         project.id,
         measureNumber,
         proposal.events,
-        proposal.time_signature
+        proposal.time_signature,
+        false
       );
       setRecognition(diagnostics);
       const refreshed = await refresh();
@@ -868,12 +869,13 @@ function ProjectWorkspace({
   const canAlign = Boolean(practiceAudioUrl && hasVisualScore);
   const isPdfProject = project.source_kind === "manual_tab" && Boolean(project.pdf_url);
   const isManualTab = project.source_kind === "manual_tab" && !isPdfProject;
-  const canReview = ["tab_cv_tesseract", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "");
+  const canReview = ["tab_cv_tesseract", "tab_cv_ai", "tab_manual_editor"].includes(project.recognition_summary?.engine ?? "");
   const pdfTabSystems = Object.entries(project.recognition_summary?.layout_counts ?? {}).reduce(
     (total, [layout, count]) => total + (layout.includes("tab") ? count : 0),
     0
   );
   const hasPdfTab = isPdfProject && pdfTabSystems > 0;
+  const canUseTabRecognition = project.video_frames.length > 0 || hasPdfTab;
   const recognizedTechniqueCount = Object.values(project.recognition_summary?.technique_counts ?? {}).reduce((total, count) => total + count, 0);
   const tempoSourceLabel = {
     user: "用户锁定",
@@ -1096,11 +1098,17 @@ function ProjectWorkspace({
               <button type="button" className={project.tempo_locked ? "active" : ""} disabled={action === "tempo"} onClick={() => void lockTempo()}>{action === "tempo" ? <LoaderCircle size={14} className="spin" /> : <LockKeyhole size={14} />} {project.tempo_locked ? "更新锁定" : "锁定"}</button>
             </div>
             <p className="inspector-copy">{isManualTab ? "同一时间格的六根弦可以组成和弦；删除只影响当前弦。音符、时值和技巧保存后会重建可播放的 MusicXML。" : project.video_frames.length ? "从原始切片识别弦号、品位和节奏网格，按小节号去重；校对器可继续修正时值与技巧。" : hasPdfTab ? `PDF 已自动拆成 ${project.recognition_summary?.system_count ?? pdfTabSystems} 行谱；六线谱负责弦与品位，检测到上五线谱时会保留为节奏和小节对照。` : "PDF 路线用于清晰印刷五线谱，识别后仍需逐小节校对。"}</p>
-            {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.page_count ? ` · ${project.recognition_summary.page_count} 页` : ""}{project.recognition_summary.system_count ? ` · ${project.recognition_summary.system_count} 行谱` : ""}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{recognizedTechniqueCount ? ` · ${recognizedTechniqueCount} 个技巧标记` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 覆盖置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}{typeof project.recognition_summary.glyph_coverage === "number" ? ` · 数字覆盖 ${Math.round(project.recognition_summary.glyph_coverage * 100)}%` : ""}</p>}
-            {!isManualTab && <button className="secondary-button full" type="button" title={scoreDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || action === "recognize" || project.status === "recognizing" || !canStartRecognition} onClick={() => run("recognize", () => api.recognizeProject(project.id), "识别任务已经开始")}>
-              {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
-              {project.video_frames.length ? (capabilities.tab_ocr ? "识别视频六线 TAB" : "安装 TAB OCR 后可用") : hasPdfTab ? (capabilities.tab_ocr ? "重新识别 PDF 六线 TAB" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}
-            </button>}
+            {project.recognition_summary && <p className="inspector-copy">上次结果：{project.recognition_summary.engine_label}{project.recognition_summary.page_count ? ` · ${project.recognition_summary.page_count} 页` : ""}{project.recognition_summary.system_count ? ` · ${project.recognition_summary.system_count} 行谱` : ""}{project.recognition_summary.measure_count ? ` · ${project.recognition_summary.measure_count} 小节` : ""}{recognizedTechniqueCount ? ` · ${recognizedTechniqueCount} 个技巧标记` : ""}{typeof project.recognition_summary.confidence === "number" ? ` · 覆盖置信度 ${Math.round(project.recognition_summary.confidence * 100)}%` : ""}{typeof project.recognition_summary.glyph_coverage === "number" ? ` · 数字覆盖 ${Math.round(project.recognition_summary.glyph_coverage * 100)}%` : ""}{project.recognition_summary.verified_measure_count ? ` · 人工核验 ${project.recognition_summary.verified_measure_count} 小节` : ""}{typeof project.recognition_summary.human_verified_accuracy === "number" ? ` · 品位准确率 ${Math.round(project.recognition_summary.human_verified_accuracy * 1000) / 10}%` : ""}</p>}
+            {!isManualTab && <div className="recognition-actions">
+              <button className="secondary-button full" type="button" title={scoreDirty ? "请先保存当前谱面修改" : undefined} disabled={scoreDirty || action === "recognize" || project.status === "recognizing" || !canStartRecognition} onClick={() => run("recognize", () => api.recognizeProject(project.id, "ocr"), "OCR 识别任务已经开始")}>
+                {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <ScanLine size={15} />}
+                {canUseTabRecognition ? (capabilities.tab_ocr ? "传统 OCR 识别" : "安装 TAB OCR 后可用") : (capabilities.audiveris ? "识别五线谱 PDF" : "安装 Audiveris 后可用")}
+              </button>
+              {canUseTabRecognition && <button className="secondary-button full ai-recognition-button" type="button" title={capabilities.ai_tab_recognition ? "调用本机 4060 品位模型，结构和技巧仍由服务器 OCR 识别" : "请先启动本机 AI 服务与 SSH 隧道"} disabled={scoreDirty || action === "recognize" || project.status === "recognizing" || !capabilities.tab_ocr || !capabilities.ai_tab_recognition} onClick={() => run("recognize", () => api.recognizeProject(project.id, "ai"), "本机 AI + OCR 任务已经开始")}>
+                {action === "recognize" ? <LoaderCircle size={15} className="spin" /> : <WandSparkles size={15} />}
+                {capabilities.ai_tab_recognition ? "本机 AI + OCR 识别（实验）" : "本机 AI 尚未连接"}
+              </button>}
+            </div>}
           </section>
 
           <section className="inspector-section audio-section">

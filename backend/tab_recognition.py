@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
@@ -9,10 +10,12 @@ import statistics
 import subprocess
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
+import httpx
 import numpy as np
 
 from backend.score_pdf import build_recognized_score_pdf
@@ -107,6 +110,8 @@ class ParsedFrame:
     notation_staff_lines: list[int] | None = None
     technique_marks: list[TechniqueMark] = field(default_factory=list)
     tempo_candidates: list[tuple[float, float]] = field(default_factory=list)
+    ai_recognized_tokens: int = 0
+    ai_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -679,7 +684,53 @@ def _normalise_ocr_cell(foreground: np.ndarray, width: int = 200, height: int = 
     return canvas
 
 
-def _run_frame_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> None:
+def _run_ai_token_ocr(frame: ParsedFrame, vision_model_url: str) -> None:
+    encoded_images: list[str] = []
+    for token in frame.tokens:
+        boxes = [glyph.box for glyph in token.glyphs if glyph.box is not None]
+        if not boxes:
+            encoded_images.append("")
+            continue
+        left = max(0, min(box[0] for box in boxes) - 4)
+        top = max(0, min(box[1] for box in boxes) - 4)
+        right = min(frame.gray.shape[1], max(box[0] + box[2] for box in boxes) + 4)
+        bottom = min(frame.gray.shape[0], max(box[1] + box[3] for box in boxes) + 4)
+        crop = frame.gray[top:bottom, left:right]
+        success, payload = cv2.imencode(".png", crop)
+        encoded_images.append(base64.b64encode(payload).decode("ascii") if success else "")
+
+    if not encoded_images or any(not value for value in encoded_images):
+        return
+    endpoint = vision_model_url.rstrip("/")
+    if not endpoint.endswith("/v1/fret-ocr"):
+        endpoint += "/v1/fret-ocr"
+    try:
+        response = httpx.post(endpoint, json={"images": encoded_images}, timeout=45.0)
+        response.raise_for_status()
+        predictions = response.json().get("predictions")
+        if not isinstance(predictions, list) or len(predictions) != len(frame.tokens):
+            raise ValueError("本地 AI 返回的预测数量与品位候选不一致")
+        for token, prediction in zip(frame.tokens, predictions, strict=True):
+            text = str(prediction.get("text") or "") if isinstance(prediction, dict) else ""
+            confidence = float(prediction.get("confidence") or 0) if isinstance(prediction, dict) else 0.0
+            if not text.isdigit() or int(text) > 36 or len(text) != len(token.glyphs):
+                continue
+            token.raw_text = text
+            token.raw_confidence = max(0.0, min(100.0, confidence * 100))
+            for glyph, label in zip(token.glyphs, text):
+                glyph.raw_label = label
+                glyph.raw_confidence = token.raw_confidence
+            frame.ai_recognized_tokens += 1
+    except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        frame.ai_error = str(exc)[:180]
+
+
+def _run_frame_ocr(
+    frame: ParsedFrame,
+    work_dir: Path,
+    tesseract_path: str,
+    vision_model_url: str | None = None,
+) -> None:
     targets: list[tuple[str, int, np.ndarray]] = []
     for index, token in enumerate(frame.tokens):
         gap = 4
@@ -806,6 +857,9 @@ def _run_frame_ocr(frame: ParsedFrame, work_dir: Path, tesseract_path: str) -> N
         measure = frame.measures[index]
         measure.raw_label = text
         measure.raw_label_confidence = readings[text]
+
+    if vision_model_url:
+        _run_ai_token_ocr(frame, vision_model_url)
 
 
 def _technique_from_text(text: str) -> str | None:
@@ -1630,21 +1684,40 @@ def recognize_tab_frames(
     title: str,
     tesseract_path: str = "tesseract",
     tempo_bpm: float | None = None,
+    recognition_mode: str = "ocr",
+    vision_model_url: str | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> TabRecognitionResult:
     if not frames:
         raise ValueError("没有视频切片可供 TAB 识别")
+    if recognition_mode not in {"ocr", "ai"}:
+        raise ValueError("识别模式必须是 ocr 或 ai")
+    if recognition_mode == "ai" and not vision_model_url:
+        raise ValueError("本地 AI 品位服务尚未连接")
     output_dir.mkdir(parents=True, exist_ok=True)
     parsed: list[ParsedFrame] = []
     parse_errors: list[str] = []
-    for source in sorted(frames, key=lambda item: item.time_seconds):
+    ordered_frames = sorted(frames, key=lambda item: item.time_seconds)
+    for frame_index, source in enumerate(ordered_frames, start=1):
         try:
             frame = parse_frame(source)
-            _run_frame_ocr(frame, output_dir / ".ocr", tesseract_path)
+            _run_frame_ocr(
+                frame,
+                output_dir / ".ocr",
+                tesseract_path,
+                vision_model_url if recognition_mode == "ai" else None,
+            )
             _run_technique_ocr(frame, output_dir / ".ocr", tesseract_path)
             _infer_frame_start(frame)
             parsed.append(frame)
         except Exception as exc:
             parse_errors.append(f"{source.path.name}: {str(exc)[:140]}")
+        finally:
+            if progress_callback:
+                try:
+                    progress_callback(frame_index, len(ordered_frames))
+                except Exception:
+                    pass
     if not parsed:
         raise RuntimeError("所有切片都无法识别为六线 TAB")
 
@@ -1730,10 +1803,14 @@ def recognize_tab_frames(
         warnings.append(
             f"仅有 {recognized_glyphs}/{total_glyphs} 个品位数字获得可用标签，置信度已按覆盖率折减"
         )
+    ai_recognized_tokens = sum(frame.ai_recognized_tokens for frame in parsed)
+    ai_failed_frames = sum(frame.ai_error is not None for frame in parsed)
+    if recognition_mode == "ai" and ai_failed_frames:
+        warnings.append(f"本地 AI 有 {ai_failed_frames} 张切片调用失败，已自动回退到传统 OCR")
 
     summary = {
-        "engine": "tab_cv_tesseract",
-        "engine_label": "六线 TAB 专用识别（Beta）",
+        "engine": "tab_cv_ai" if recognition_mode == "ai" else "tab_cv_tesseract",
+        "engine_label": "本地 AI + OCR 六线 TAB（实验）" if recognition_mode == "ai" else "六线 TAB 专用识别（Beta）",
         "measure_count": len(usable),
         "start_measure": start_measure,
         "end_measure": end_measure,
@@ -1747,6 +1824,8 @@ def recognize_tab_frames(
         "recognized_glyphs": recognized_glyphs,
         "total_glyphs": total_glyphs,
         "low_confidence_glyphs": low_confidence,
+        "ai_recognized_tokens": ai_recognized_tokens,
+        "ai_failed_frames": ai_failed_frames,
         "technique_counts": dict(sorted(technique_counts.items())),
         "parsed_frames": len(parsed),
         "failed_frames": len(parse_errors),
@@ -1780,6 +1859,8 @@ def recognize_tab_frames(
                 "raw_measure_labels": [measure.raw_label for measure in frame.measures],
                 "layout": frame.layout,
                 "polarity": frame.polarity,
+                "ai_recognized_tokens": frame.ai_recognized_tokens,
+                "ai_error": frame.ai_error,
             }
             for frame in parsed
         ],
@@ -1796,6 +1877,15 @@ def recognize_tab_frames(
                     }
                     for event in candidate.events
                 ],
+                "ocr_events": [
+                    {
+                        "onset_eighths": event.onset,
+                        "duration_eighths": event.duration,
+                        "notes": [_tab_note_to_dict(note) for note in event.notes],
+                    }
+                    for event in candidate.events
+                ],
+                "human_verified": False,
                 "time_signature": {"numerator": 4, "denominator": 4},
                 "validation": _measure_validation(candidate.events, EIGHTH_UNITS_PER_MEASURE),
             }
@@ -1814,6 +1904,8 @@ def recognize_tab_measure(
     frame_start_measure: int,
     measure_number: int,
     tesseract_path: str = "tesseract",
+    recognition_mode: str = "ocr",
+    vision_model_url: str | None = None,
 ) -> dict:
     """Re-run OCR for one measure and return an unsaved review proposal."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1821,7 +1913,12 @@ def recognize_tab_measure(
     target_index = measure_number - frame_start_measure
     if target_index < 0 or target_index >= len(parsed.measures):
         raise ValueError("所选切片不包含这个小节，请重新选择更接近的源帧")
-    _run_frame_ocr(parsed, output_dir / ".ocr", tesseract_path)
+    _run_frame_ocr(
+        parsed,
+        output_dir / ".ocr",
+        tesseract_path,
+        vision_model_url if recognition_mode == "ai" else None,
+    )
     _run_technique_ocr(parsed, output_dir / ".ocr", tesseract_path)
     parsed.start_measure = frame_start_measure
     parsed.start_measure_confidence = 100.0
@@ -1854,6 +1951,7 @@ def update_recognized_measure(
     measure_number: int,
     events: list[dict],
     time_signature: tuple[int, int] | None = None,
+    human_verified: bool = False,
 ) -> dict:
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     summary = diagnostics.get("summary") or {}
@@ -1907,6 +2005,9 @@ def update_recognized_measure(
 
     source_time = float(existing.get("source_time") or 0) if existing else 0.0
     quality = float(existing.get("quality") or 100) if existing else 100.0
+    baseline_events = (existing or {}).get("ocr_events")
+    if baseline_events is None:
+        baseline_events = (existing or {}).get("events", [])
     replacement = {
         "number": measure_number,
         "quality": round(quality, 2),
@@ -1920,6 +2021,8 @@ def update_recognized_measure(
             }
             for event in normalized_events
         ],
+        "ocr_events": baseline_events,
+        "human_verified": human_verified,
         "time_signature": {"numerator": numerator, "denominator": denominator},
         "validation": _measure_validation(normalized_events, capacity),
     }
@@ -1969,6 +2072,35 @@ def update_recognized_measure(
         )["is_complete"]
     ]
     summary["invalid_measures"] = invalid_measures
+
+    verified_rows = [row for row in measure_rows if row.get("human_verified")]
+    verified_notes = 0
+    correct_notes = 0
+    for row in verified_rows:
+        original = {
+            (round(float(event.get("onset_eighths") or 0), 3), int(note.get("string") or 0)): int(note.get("fret") or 0)
+            for event in row.get("ocr_events", [])
+            for note in event.get("notes", [])
+        }
+        corrected = {
+            (round(float(event.get("onset_eighths") or 0), 3), int(note.get("string") or 0)): int(note.get("fret") or 0)
+            for event in row.get("events", [])
+            for note in event.get("notes", [])
+        }
+        note_positions = set(original) | set(corrected)
+        verified_notes += len(note_positions)
+        correct_notes += sum(
+            position in original
+            and position in corrected
+            and original[position] == corrected[position]
+            for position in note_positions
+        )
+    summary["verified_measure_count"] = len(verified_rows)
+    summary["verified_note_count"] = verified_notes
+    summary["correct_note_count"] = correct_notes
+    summary["human_verified_accuracy"] = (
+        round(correct_notes / verified_notes, 4) if verified_notes else None
+    )
     warnings = [
         warning
         for warning in summary.get("warnings", [])

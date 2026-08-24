@@ -454,10 +454,14 @@ def test_recognition_prefers_video_tab_frames(client: TestClient, monkeypatch, t
             "audiveris_path": None,
             "tab_ocr": True,
             "tesseract_path": "tesseract",
+            "ai_tab_recognition": True,
         },
     )
 
-    def fake_recognize(_frames, output_dir, **_kwargs):
+    recognition_options = {}
+
+    def fake_recognize(_frames, output_dir, **kwargs):
+        recognition_options.update(kwargs)
         output_dir.mkdir(parents=True)
         score = output_dir / "recognized.musicxml"
         score.write_text("<score-partwise version='4.0'/>", encoding="utf-8")
@@ -495,10 +499,12 @@ def test_recognition_prefers_video_tab_frames(client: TestClient, monkeypatch, t
         )
 
     monkeypatch.setattr("backend.app.recognize_tab_frames", fake_recognize)
-    response = client.post(f"/api/projects/{project['id']}/recognize")
+    response = client.post(f"/api/projects/{project['id']}/recognize?mode=ai")
 
     assert response.status_code == 202
     assert response.json()["engine"] == "tablature"
+    assert response.json()["mode"] == "ai"
+    assert recognition_options["recognition_mode"] == "ai"
     payload = client.get(f"/api/projects/{project['id']}").json()
     assert payload["status"] == "score_ready"
     assert payload["recognition_summary"]["measure_count"] == 8
@@ -523,6 +529,9 @@ def test_recognition_prefers_video_tab_frames(client: TestClient, monkeypatch, t
         {"string": 2, "fret": 7, "technique": "slide"}
     ]
     assert edited.json()["measures"][0]["events"][0]["duration_eighths"] == 0.5
+    assert edited.json()["summary"]["verified_measure_count"] == 1
+    assert edited.json()["summary"]["verified_note_count"] == 2
+    assert edited.json()["summary"]["human_verified_accuracy"] == 0
 
     def fake_retry_measure(frame, _output_dir, **kwargs):
         assert frame.path == frame_path

@@ -70,18 +70,21 @@ export const api = {
       `/api/projects/${id}/video-analysis`,
       { method: "POST", body: JSON.stringify(payload) }
     ),
-  recognizeProject: (id: string) =>
-    request<{ status: string; message: string; engine: "tablature" | "staff" }>(`/api/projects/${id}/recognize`, { method: "POST" }),
+  recognizeProject: (id: string, mode: "ocr" | "ai" = "ocr") =>
+    request<{ status: string; message: string; engine: "tablature" | "staff"; mode: "ocr" | "ai" }>(
+      `/api/projects/${id}/recognize?mode=${mode}`,
+      { method: "POST" }
+    ),
   recognition: (id: string) => request<RecognitionDiagnostics>(`/api/projects/${id}/recognition`),
   retryRecognitionMeasure: (id: string, measure: number) =>
     request<RecognitionMeasure & { source_frame: number; source_name: string }>(
       `/api/projects/${id}/recognition/measures/${measure}/retry`,
       { method: "POST" }
     ),
-  updateRecognitionMeasure: (id: string, measure: number, events: RecognitionEvent[], timeSignature?: { numerator: number; denominator: number }) =>
+  updateRecognitionMeasure: (id: string, measure: number, events: RecognitionEvent[], timeSignature?: { numerator: number; denominator: number }, humanVerified = true) =>
     request<RecognitionDiagnostics>(`/api/projects/${id}/recognition/measures/${measure}`, {
       method: "PATCH",
-      body: JSON.stringify({ events, ...(timeSignature ? { time_signature: timeSignature } : {}) })
+      body: JSON.stringify({ events, human_verified: humanVerified, ...(timeSignature ? { time_signature: timeSignature } : {}) })
     }),
   appendRecognitionMeasure: (id: string, afterMeasure?: number) =>
     request<RecognitionDiagnostics>(

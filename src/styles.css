@@ -169,6 +169,8 @@ button:active, .primary-button:active, .quiet-button:active, .project-card:activ
 .primary-button { min-height: 2.7rem; display: inline-flex; align-items: center; justify-content: center; gap: .55rem; padding: .65rem 1rem; border-radius: .8rem; color: #fff; font-size: .83rem; font-weight: 680; background: linear-gradient(180deg, #8e85ef, #6e65ce); box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 9px 26px rgba(76,65,178,.22); }
 .primary-button:hover { background: linear-gradient(180deg, #a097ff, #766cdb); }
 .primary-button.full, .secondary-button.full { width: 100%; }
+.recognition-actions { display: grid; gap: .55rem; }
+.ai-recognition-button { border-color: rgba(137, 103, 255, .45); background: rgba(116, 84, 218, .1); }
 .primary-button:disabled, .secondary-button:disabled, .icon-button:disabled { cursor: not-allowed; opacity: .42; }
 .auth-form .primary-button { margin-top: .55rem; min-height: 3.15rem; }
 .privacy-note { display: flex; align-items: center; justify-content: center; gap: .4rem; margin: 1.2rem 0 0; color: #65656e; font-size: .68rem; line-height: 1.5; }

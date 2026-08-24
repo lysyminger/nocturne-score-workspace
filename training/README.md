@@ -80,9 +80,21 @@ PDF 切片属于弱标注，必须抽样复核后才能进入符号检测训练�
 powershell -ExecutionPolicy Bypass -File .\training\prepare_real_video.ps1 -Stride 4
 ```
 
-脚本会复用网站现有的六线谱定位逻辑，按完整品位 token（例如 `13`，不是拆开的 `1`、`3`）保存原始背景和归一化候选，并用已导出的品位模型给出建议值。打开 `training/data/real-video-token-review/review.html` 可分页核验；相同字体会先聚类，一次确认可传播到同簇候选。导出的 `verified-labels.tsv` 才能作为真实标签。预测值只是待确认建议，不能把高置信预测直接当真值，否则会把旧模型错误重新训练进去。
+脚本会复用网站现有的六线谱定位逻辑，按完整品位 token（例如 `13`，不是拆开的 `1`、`3`）保存原始背景和归一化候选，并用已导出的品位模型给出建议值。输入帧会按 SHA-256 精确去重，明细写入 `duplicates.json`；由同批切片生成的 PDF 只作校对参考，不能再次渲染后当作独立样本。打开 `training/data/real-video-token-review/review.html` 可分页核验；相同字体会先聚类，一次确认可传播到同簇候选。导出的 `verified-labels.tsv` 才能作为真实标签。预测值只是待确认建议，不能把高置信预测直接当真值，否则会把旧模型错误重新训练进去。
 
 真实域划分必须按视频/BV 号进行：同一视频的不同时间、不同裁切范围和重复项目只能位于同一个 split。至少完整保留一个视频作为固定测试集，训练后才能知道黑底、透明叠加和五线谱+六线谱是否真正提升。
+
+## 本机 4060 与服务器联动
+
+先确保服务器可以使用 SSH 密钥登录，再在 Windows 项目目录运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\training\start_server_linked_ocr.ps1
+```
+
+脚本会在 `127.0.0.1:8892` 启动 Paddle 品位模型，并建立仅监听服务器回环地址的 SSH 反向隧道，不向局域网直接开放模型端口。服务器进程设置 `NOCTURNE_VISION_MODEL=http://127.0.0.1:8892` 后，网页会显示“本机 AI + OCR 识别（实验）”。Windows 重启或 SSH 隧道中断后需要重新运行脚本；日志位于 `training/runs/server-linked-ocr/`。
+
+AI 模式负责品位数字，服务器仍负责谱线、小节、节奏和技巧识别。识别进度会写回项目状态，最终 MusicXML 与诊断文件采用原子替换，避免半成品谱面覆盖用户正在编辑的版本。
 
 ## 数据边界
 

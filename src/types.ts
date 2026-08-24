@@ -33,6 +33,12 @@ export type RecognitionSummary = {
   recognized_glyphs?: number;
   total_glyphs?: number;
   low_confidence_glyphs?: number;
+  ai_recognized_tokens?: number;
+  ai_failed_frames?: number;
+  verified_measure_count?: number;
+  verified_note_count?: number;
+  correct_note_count?: number;
+  human_verified_accuracy?: number | null;
   layout_counts?: Record<string, number>;
   technique_counts?: Record<string, number>;
   polarity_counts?: Record<string, number>;
@@ -126,6 +132,8 @@ export type RecognitionMeasure = {
   quality: number;
   source_time: number;
   events: RecognitionEvent[];
+  ocr_events?: RecognitionEvent[];
+  human_verified?: boolean;
   time_signature?: { numerator: number; denominator: number };
   validation?: MeasureValidation;
 };

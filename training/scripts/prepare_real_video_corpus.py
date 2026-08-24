@@ -251,6 +251,8 @@ def main() -> None:
 
     rows: list[dict] = []
     failures: list[dict] = []
+    duplicates: list[dict] = []
+    seen_frame_hashes: dict[str, str] = {}
     run_counts: Counter[str] = Counter()
     layout_counts: Counter[str] = Counter()
     polarity_counts: Counter[str] = Counter()
@@ -271,13 +273,24 @@ def main() -> None:
             time_seconds = max(0, number - 1) * args.frame_seconds
             relative_source = frame_path.relative_to(source).as_posix()
             try:
+                source_hash = sha256_file(frame_path)
+                duplicate_of = seen_frame_hashes.get(source_hash)
+                if duplicate_of is not None:
+                    duplicates.append(
+                        {
+                            "source_frame": relative_source,
+                            "duplicate_of": duplicate_of,
+                            "source_sha256": source_hash,
+                        }
+                    )
+                    continue
                 frame = parse_frame(FrameInput(frame_path, time_seconds, max(0, number - 1)))
                 original = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
                 if original is None:
                     raise ValueError("OpenCV 无法读取图片")
+                seen_frame_hashes[source_hash] = relative_source
                 normalized = cv2.cvtColor(frame.gray, cv2.COLOR_GRAY2BGR)
                 height, width = original.shape[:2]
-                source_hash = sha256_file(frame_path)
                 run_key = f"{project_id}/{analysis_id}"
                 run_counts[run_key] += 1
                 layout_counts[frame.layout] += 1
@@ -434,6 +447,9 @@ def main() -> None:
     (output / "failures.json").write_text(
         json.dumps(failures, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    (output / "duplicates.json").write_text(
+        json.dumps(duplicates, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     build_review_html(cluster_rows, output)
 
     confidence_values = [row["confidence"] for row in rows]
@@ -445,6 +461,7 @@ def main() -> None:
         "source_ids": sorted({row["source_id"] for row in rows}),
         "parsed_frames": sum(run_counts.values()),
         "failed_frames": len(failures),
+        "duplicate_frames_skipped": len(duplicates),
         "candidates": len(rows),
         "clusters_to_review": len(cluster_rows),
         "cluster_reduction_ratio": round(1 - len(cluster_rows) / len(rows), 6) if rows else 0.0,

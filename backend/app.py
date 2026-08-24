@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image, ImageOps, UnidentifiedImageError
+import httpx
 from starlette.concurrency import run_in_threadpool
 
 from backend.audio_analysis import analyze_audio_file
@@ -178,6 +179,7 @@ class TimeSignatureEdit(BaseModel):
 class TabMeasureEdit(BaseModel):
     events: list[TabEventEdit] = Field(max_length=32)
     time_signature: TimeSignatureEdit | None = None
+    human_verified: bool = True
 
 
 def capability_status() -> dict:
@@ -197,6 +199,16 @@ def capability_status() -> dict:
     except ImportError:
         tab_cv_available = False
     ffmpeg_available = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    vision_model_url = os.getenv("NOCTURNE_VISION_MODEL")
+    ai_tab_available = False
+    if vision_model_url:
+        try:
+            health_url = vision_model_url.rstrip("/")
+            if health_url.endswith("/v1/fret-ocr"):
+                health_url = health_url[: -len("/v1/fret-ocr")]
+            ai_tab_available = httpx.get(f"{health_url}/health", timeout=1.5).is_success
+        except httpx.HTTPError:
+            ai_tab_available = False
     return {
         "ffmpeg": ffmpeg_available,
         "yt_dlp": yt_dlp_available,
@@ -204,7 +216,7 @@ def capability_status() -> dict:
         "audiveris_path": audiveris_path or None,
         "tab_ocr": bool(tesseract_path and tab_cv_available),
         "tesseract_path": tesseract_path or None,
-        "ai_tab_recognition": bool(os.getenv("NOCTURNE_VISION_MODEL")),
+        "ai_tab_recognition": ai_tab_available,
         "audio_analysis": ffmpeg_available,
     }
 
@@ -1489,6 +1501,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         tesseract_path: str,
         output_dir: Path,
         replace_pdf: bool = True,
+        recognition_mode: Literal["ocr", "ai"] = "ocr",
     ) -> None:
         try:
             with db.connect() as connection:
@@ -1500,12 +1513,29 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 if tempo_row and tempo_row["tempo_locked"] and tempo_row["tempo_bpm"] is not None
                 else None
             )
+            last_progress = 0
+
+            def update_progress(completed: int, total: int) -> None:
+                nonlocal last_progress
+                if completed != total and completed - last_progress < 4:
+                    return
+                last_progress = completed
+                label = "本地 AI + OCR" if recognition_mode == "ai" else "OCR"
+                with db.connect() as progress_connection:
+                    progress_connection.execute(
+                        "UPDATE projects SET status_message = ?, updated_at = ? WHERE id = ?",
+                        (f"{label} 正在写入可编辑谱面：{completed}/{total} 张切片", utc_text(), project_id),
+                    )
+
             result = recognize_tab_frames(
                 frames,
                 output_dir,
                 title=title,
                 tesseract_path=tesseract_path,
                 tempo_bpm=locked_tempo,
+                recognition_mode=recognition_mode,
+                vision_model_url=os.getenv("NOCTURNE_VISION_MODEL"),
+                progress_callback=update_progress,
             )
             summary = result.summary
             with db.connect() as connection:
@@ -1559,12 +1589,15 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def recognize_score(
         project_id: str,
         background_tasks: BackgroundTasks,
+        mode: Literal["ocr", "ai"] = "ocr",
         user: dict = Depends(current_user),
     ) -> dict:
         project = owned_project(project_id, user["id"])
         if project["status"] == "recognizing":
             raise HTTPException(status_code=409, detail="当前项目正在识别，请等待完成")
         capabilities = capability_status()
+        if mode == "ai" and not capabilities["ai_tab_recognition"]:
+            raise HTTPException(status_code=503, detail="本机 4060 AI 品位服务尚未连接")
         with db.connect() as connection:
             video_rows = connection.execute(
                 """
@@ -1598,7 +1631,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
 
         if tab_frames and capabilities["tab_ocr"]:
             engine = "tablature"
-            status_message = "正在识别六线 TAB 的品位、弦号和节奏网格…"
+            status_message = (
+                "正在连接本机 4060，用 AI + OCR 识别品位、弦号和节奏…"
+                if mode == "ai"
+                else "正在识别六线 TAB 的品位、弦号和节奏网格…"
+            )
         elif project["score_pdf_path"] and capabilities["audiveris"]:
             engine = "staff"
             status_message = "正在用 Audiveris 识别印刷五线谱…"
@@ -1623,6 +1660,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 capabilities["tesseract_path"],
                 output_dir,
                 bool(video_rows),
+                mode,
             )
         else:
             background_tasks.add_task(
@@ -1632,11 +1670,11 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 capabilities["audiveris_path"],
                 output_dir,
             )
-        return {"status": "recognizing", "message": "识别任务已开始", "engine": engine}
+        return {"status": "recognizing", "message": "识别任务已开始", "engine": engine, "mode": mode}
 
     def tab_diagnostics_for_project(project) -> tuple[Path, Path, dict]:
         summary = json_object(project["recognition_summary"])
-        if not summary or summary.get("engine") not in {"tab_cv_tesseract", "tab_manual_editor"}:
+        if not summary or summary.get("engine") not in {"tab_cv_tesseract", "tab_cv_ai", "tab_manual_editor"}:
             raise HTTPException(status_code=409, detail="当前项目没有可编辑的 TAB 识别结果")
         if not project["score_file_path"]:
             raise HTTPException(status_code=404, detail="识别乐谱文件不存在")
@@ -1734,6 +1772,8 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     frame_start_measure=int(frame_info["start_measure"]),
                     measure_number=measure_number,
                     tesseract_path=capabilities["tesseract_path"],
+                    recognition_mode="ai" if summary.get("engine") == "tab_cv_ai" else "ocr",
+                    vision_model_url=os.getenv("NOCTURNE_VISION_MODEL"),
                 )
         except (OSError, RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"第 {measure_number} 小节重新识别失败：{str(exc)[:240]}") from exc
@@ -1756,6 +1796,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 events=[event.model_dump() for event in body.events],
                 time_signature=(body.time_signature.numerator, body.time_signature.denominator)
                 if body.time_signature else None,
+                human_verified=body.human_verified,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

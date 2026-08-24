@@ -108,7 +108,10 @@ sudo systemctl restart nocturne.service
 [Service]
 Environment=TESSERACT_BIN=/usr/bin/tesseract
 Environment=AUDIVERIS_BIN=/opt/audiveris/bin/Audiveris
+Environment=NOCTURNE_VISION_MODEL=http://127.0.0.1:8892
 ```
+
+`NOCTURNE_VISION_MODEL` 只应指向可信的内网或 SSH 隧道端点。本机 GPU 方案可运行 `training/start_server_linked_ocr.ps1` 建立仅绑定服务器回环地址的反向隧道；模型服务离线时，网页仍可使用传统 OCR。
 
 ## 6. 发布新版本
 

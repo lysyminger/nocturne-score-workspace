@@ -387,6 +387,7 @@ def test_updates_recognized_measure_and_rebuilds_musicxml(tmp_path):
                 ],
             }
         ],
+        human_verified=True,
     )
 
     root = ET.parse(score_path).getroot()
@@ -398,6 +399,10 @@ def test_updates_recognized_measure_and_rebuilds_musicxml(tmp_path):
         "technique": "bend",
     }
     assert root.findtext(".//bend/bend-alter") == "2"
+    assert result["summary"]["verified_measure_count"] == 1
+    assert result["summary"]["verified_note_count"] == 3
+    assert result["summary"]["correct_note_count"] == 0
+    assert result["summary"]["human_verified_accuracy"] == 0
 
 
 def test_updates_recognized_measure_with_double_dotted_duration(tmp_path):

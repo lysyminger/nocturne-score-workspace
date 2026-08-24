@@ -51,6 +51,7 @@ class DigitGlyph:
     confidence: float = 0.0
     raw_label: str | None = None
     raw_confidence: float = 0.0
+    box: tuple[int, int, int, int] | None = None
 
 
 @dataclass
@@ -407,7 +408,13 @@ def extract_note_tokens(
                     max(0, y - crop_top) : max(0, y - crop_top) + height,
                     x : x + width,
                 ]
-                glyphs.append(DigitGlyph(glyph_image, _glyph_feature(glyph_image)))
+                glyphs.append(
+                    DigitGlyph(
+                        glyph_image,
+                        _glyph_feature(glyph_image),
+                        box=(x, y, width, height),
+                    )
+                )
             left = min(item[0] for item in group)
             right = max(item[0] + item[2] for item in group)
             tokens.append(NoteToken(x=(left + right) / 2, string=string, glyphs=glyphs))

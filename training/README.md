@@ -72,6 +72,18 @@ GP 的音符、品位、弦号、时值与技巧来自原始结构化数据；al
 
 PDF 切片属于弱标注，必须抽样复核后才能进入符号检测训练集。PaddleOCR 的原始训练说明仍以 `training/vendor/PaddleOCR/docs/` 中的官方文档为准。
 
+## 服务器真实视频切片
+
+服务器切片同步到 `training/data/real-video/` 后，先作为独立真实域测试/校对集，不要直接混入训练集：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\training\prepare_real_video.ps1 -Stride 4
+```
+
+脚本会复用网站现有的六线谱定位逻辑，按完整品位 token（例如 `13`，不是拆开的 `1`、`3`）保存原始背景和归一化候选，并用已导出的品位模型给出建议值。打开 `training/data/real-video-token-review/review.html` 可分页核验；相同字体会先聚类，一次确认可传播到同簇候选。导出的 `verified-labels.tsv` 才能作为真实标签。预测值只是待确认建议，不能把高置信预测直接当真值，否则会把旧模型错误重新训练进去。
+
+真实域划分必须按视频/BV 号进行：同一视频的不同时间、不同裁切范围和重复项目只能位于同一个 split。至少完整保留一个视频作为固定测试集，训练后才能知道黑底、透明叠加和五线谱+六线谱是否真正提升。
+
 ## 数据边界
 
 - 原视频、PDF、账号数据和私人项目文件只保存在本地 `training/data/`。
